@@ -109,6 +109,9 @@ def test_no_inferred_numeric_values(value):
         ({"junction": "roundabout", "oneway": "no"}, 0),
         ({"highway": "motorway", "oneway": "-1"}, -1),
         ({"highway": "motorway", "oneway": "false"}, 0),
+        ({"highway": "motorway", "oneway": "reversible"}, 0),
+        ({"highway": "motorway_link", "oneway": "alternating"}, 0),
+        ({"junction": "roundabout", "oneway": "reversible"}, 0),
     ],
 )
 def test_direction(tags, expected):

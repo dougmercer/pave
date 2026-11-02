@@ -129,7 +129,8 @@ pub fn direction(tags: &Tags) -> i8 {
     {
         "yes" | "true" | "1" => return 1,
         "-1" => return -1,
-        "no" | "false" | "0" => return 0,
+        // An explicit tag beats the implied rules below; these roads carry both directions.
+        "no" | "false" | "0" | "reversible" | "alternating" => return 0,
         _ => (),
     }
     if matches!(get(tags, "junction"), Some("roundabout" | "circular"))

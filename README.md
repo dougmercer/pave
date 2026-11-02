@@ -148,10 +148,12 @@ count once. Shape nodes remain in the polyline. Closed roads retain their closin
 vertex and can produce self-loops. Nothing is projected, simplified, interpolated,
 or split merely because it crosses a tile boundary.
 
-Explicit `oneway=yes/true/1` emits forward edges; `-1` emits reversed edges.
-`no/false/0` explicitly permits both directions. Otherwise `junction=roundabout`
-or `circular`, `highway=motorway`, and `motorway_link` imply forward-only travel.
-Other roads emit both directions with reversed vertex order for the second.
+An explicit `oneway` tag always beats an implied rule. `yes/true/1` emits forward
+edges and `-1` emits reversed edges. `no/false/0` permits both directions, as do
+`reversible` and `alternating`, whose traffic runs both ways at different times.
+Otherwise `junction=roundabout` or `circular`, `highway=motorway`, and
+`motorway_link` imply forward-only travel. Other roads emit both directions with
+reversed vertex order for the second.
 Turn restrictions and all other relations are ignored.
 
 Width precedence is a positive `width`, then positive `lanes × 3.5`, then service
