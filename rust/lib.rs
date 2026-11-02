@@ -28,9 +28,13 @@ fn build(
         cache_mb,
         threads,
         quiet,
+        interrupted: Box::new(|| Python::attach(|py| py.check_signals()).map_err(Into::into)),
     };
-    py.detach(move || engine::run(config))
-        .map_err(|error| PyValueError::new_err(format!("{error:#}")))
+    py.detach(move || engine::run(config)).map_err(|error| {
+        error
+            .downcast::<PyErr>()
+            .unwrap_or_else(|error| PyValueError::new_err(format!("{error:#}")))
+    })
 }
 
 #[pyfunction(name = "width_m")]

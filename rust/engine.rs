@@ -1,16 +1,23 @@
-use crate::index::{DiskIndex, NodeWriter, database, export_junctions, writer};
+use crate::index::{DiskIndex, RefSorter, database, writer};
 use crate::storage::{COLUMNS, Dictionaries, Spools};
 use crate::tags::{self, HIGHWAYS, STRINGS, Tags};
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, SecondsFormat};
-use osmpbf::{Blob, BlobReader, BlobType, ByteOffset, Element, HeaderBlock, PrimitiveBlock, Way};
+use osmpbf::{BlobReader, BlobType, ByteOffset, Element, HeaderBlock, PrimitiveBlock, Way};
 use rayon::prelude::*;
-use rusqlite::params;
 use serde_json::{Value, json};
-use std::fs::{self, File};
-use std::io::{BufReader, Read, Write};
+use std::fs;
+use std::io::Write;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::sync_channel;
 use std::time::Instant;
+
+/// Edge rows and vertices buffered across all tiles before spilling to scratch.
+const SPOOL_BYTES: usize = 64 << 20;
+const UNSORTED_NODES: &str = "Nodes must have unique ascending IDs; use a sorted snapshot extract";
+const UNSORTED_FILE: &str = "PBF header claims Sort.Type_then_ID but elements are not sorted";
+const UNSORTED_WAYS: &str = "Ways must have unique ascending IDs; use a sorted snapshot extract";
 
 pub struct Config {
     pub input: PathBuf,
@@ -20,28 +27,99 @@ pub struct Config {
     pub cache_mb: usize,
     pub threads: usize,
     pub quiet: bool,
+    /// Polled between batches on the calling thread, so Ctrl-C is not deferred to the end.
+    pub interrupted: Box<dyn Fn() -> Result<()> + Send + Sync>,
 }
 
-enum Block {
-    Header(HeaderBlock),
-    Data(PrimitiveBlock),
-    Other,
-}
-
-fn decode(blobs: &[Blob], pool: &rayon::ThreadPool) -> Result<Vec<Block>> {
-    // Batches are bounded by --threads and consumed in source order.
-    pool.install(|| {
-        blobs
-            .par_iter()
-            .map(|blob| {
-                Ok(match blob.get_type() {
-                    BlobType::OsmHeader => Block::Header(blob.to_headerblock()?),
-                    BlobType::OsmData => Block::Data(blob.to_primitiveblock()?),
-                    BlobType::Unknown(_) => Block::Other,
-                })
-            })
-            .collect()
+/// Run `work` on the decode pool in batches, feeding results to `consume` in source order.
+/// Blocks are decoded, transformed and dropped by workers; the caller only does ordered I/O.
+fn pipeline<T: Send>(
+    config: &Config,
+    pool: &rayon::ThreadPool,
+    offsets: &[u64],
+    work: impl Fn(u64, PrimitiveBlock) -> Result<T> + Sync,
+    mut consume: impl FnMut(T) -> Result<()>,
+) -> Result<()> {
+    let (sender, receiver) = sync_channel::<Vec<T>>(2);
+    let work = &work;
+    std::thread::scope(|scope| {
+        let producer = scope.spawn(move || -> Result<()> {
+            let mut reader = BlobReader::seekable_from_path(&config.input)?;
+            for batch in offsets.chunks(config.threads * 2) {
+                let blobs = batch
+                    .iter()
+                    .map(|&offset| reader.blob_from_offset(ByteOffset(offset)))
+                    .collect::<osmpbf::Result<Vec<_>>>()?;
+                let results = pool.install(|| {
+                    blobs
+                        .par_iter()
+                        .map(|blob| {
+                            let offset = blob.offset().context("PBF reader has no byte offset")?.0;
+                            work(offset, blob.to_primitiveblock()?)
+                        })
+                        .collect::<Result<Vec<_>>>()
+                })?;
+                if sender.send(results).is_err() {
+                    break;
+                }
+            }
+            Ok(())
+        });
+        let consumed = (|| {
+            for batch in receiver {
+                (config.interrupted)()?;
+                for item in batch {
+                    consume(item)?;
+                }
+            }
+            Ok(())
+        })();
+        let produced = producer.join().expect("decode thread panicked");
+        consumed.and(produced)
     })
+}
+
+/// Stream blob headers, read the OSM header, and find where node blocks end.
+fn layout(config: &Config) -> Result<(Value, Vec<u64>, usize)> {
+    let mut reader = BlobReader::seekable_from_path(&config.input)?;
+    let (mut header, mut data) = (None, Vec::new());
+    while let Some(entry) = reader.next_header_skip_blob() {
+        let (blob_header, offset) = entry?;
+        let offset = offset.context("PBF reader has no byte offset")?.0;
+        match blob_header.blob_type() {
+            BlobType::OsmHeader => header = header.or(Some(offset)),
+            BlobType::OsmData => data.push(offset),
+            BlobType::Unknown(_) => (),
+        }
+    }
+    let header = reader
+        .blob_from_offset(ByteOffset(header.context("No OSM header in input PBF")?))?
+        .to_headerblock()?;
+    let source = source_header(&header, &config.input)?;
+    let sorted = header
+        .optional_features()
+        .iter()
+        .any(|f| f == "Sort.Type_then_ID");
+    // Sorted files keep nodes first, so the node/way boundary can be found by bisection.
+    let mut boundary = 0;
+    if sorted {
+        let mut high = data.len();
+        while boundary < high {
+            let mid = boundary + (high - boundary) / 2;
+            let block = reader
+                .blob_from_offset(ByteOffset(data[mid]))?
+                .to_primitiveblock()?;
+            let only_nodes = !block
+                .groups()
+                .any(|group| group.ways().next().is_some() || group.relations().next().is_some());
+            if only_nodes {
+                boundary = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+    }
+    Ok((source, data, boundary))
 }
 
 fn source_header(header: &HeaderBlock, path: &Path) -> Result<Value> {
@@ -71,111 +149,174 @@ fn source_header(header: &HeaderBlock, path: &Path) -> Result<Value> {
     }))
 }
 
-fn topology(config: &Config, pool: &rayon::ThreadPool) -> Result<(Value, u64)> {
-    let db = database(&config.scratch.join("topology.sqlite"), config.cache_mb)?;
-    db.execute_batch(
-        "CREATE TABLE nodes(id INTEGER PRIMARY KEY, uses INTEGER, endpoint INTEGER); BEGIN",
-    )?;
-    let mut upsert = db.prepare(
-        "INSERT INTO nodes VALUES (?,1,?) ON CONFLICT(id)
-        DO UPDATE SET uses=2, endpoint=max(endpoint,excluded.endpoint)",
-    )?;
-    let mut locations = NodeWriter::new(&config.scratch.join("locations.idx"))?;
-    let mut way_blocks = writer(&config.scratch.join("ways.blocks"))?;
-    let mut reader = BlobReader::seekable_from_path(&config.input)?;
-    let mut source = None;
-    let mut ways = 0;
-    let mut last_way = None;
-    let mut refs = Vec::new();
-    loop {
-        let blobs = reader
-            .by_ref()
-            .take(config.threads)
-            .collect::<osmpbf::Result<Vec<_>>>()?;
-        if blobs.is_empty() {
-            break;
-        }
-        let blocks = decode(&blobs, pool)?;
-        for (blob, block) in blobs.iter().zip(blocks) {
-            match block {
-                Block::Header(header) => {
-                    source = Some(source_header(&header, &config.input)?);
-                }
-                Block::Data(block) => {
-                    let mut contains_ways = false;
-                    for element in block.elements() {
-                        match element {
-                            Element::Node(node) => locations.add(
-                                node.id(),
-                                node.nano_lon() as f64 / 1e9,
-                                node.nano_lat() as f64 / 1e9,
-                            )?,
-                            Element::DenseNode(node) => locations.add(
-                                node.id(),
-                                node.nano_lon() as f64 / 1e9,
-                                node.nano_lat() as f64 / 1e9,
-                            )?,
-                            Element::Way(way) => {
-                                contains_ways = true;
-                                ensure!(
-                                    last_way.is_none_or(|id| way.id() > id),
-                                    "Ways must have unique ascending IDs; use a sorted snapshot extract"
-                                );
-                                last_way = Some(way.id());
-                                if !way.tags().any(|(key, value)| {
-                                    key == "highway" && tags::highway_code(value).is_some()
-                                }) {
-                                    continue;
-                                }
-                                ways += 1;
-                                refs.clear();
-                                refs.extend(way.refs());
-                                if refs.is_empty() {
-                                    continue;
-                                }
-                                let first = refs[0];
-                                let last = *refs.last().unwrap();
-                                refs.sort_unstable();
-                                refs.dedup(); // Distinct ways, not repeated occurrences within a way.
-                                for &id in &refs {
-                                    upsert.execute(params![
-                                        id,
-                                        i32::from(id == first || id == last)
-                                    ])?;
-                                }
-                            }
-                            Element::Relation(_) => (),
-                        }
-                    }
-                    if contains_ways {
-                        way_blocks.write_all(
-                            &blob
-                                .offset()
-                                .context("PBF reader has no byte offset")?
-                                .0
-                                .to_le_bytes(),
-                        )?;
-                    }
-                }
-                Block::Other => (),
-            }
-        }
-    }
-    drop(upsert);
-    db.execute_batch("COMMIT")?;
-    locations.finish()?;
-    way_blocks.flush()?;
-    export_junctions(&db, &config.scratch.join("junctions.idx"))?;
-    Ok((source.context("No OSM header in input PBF")?, ways))
+struct WayScan {
+    offset: u64,
+    keys: Vec<i64>,
+    ways: u64,
+    range: Option<(i64, i64)>,
 }
 
-fn emit_way(
-    way: Way<'_>,
-    nodes: &DiskIndex,
-    junctions: &DiskIndex,
-    dictionaries: &mut Dictionaries<'_>,
-    spools: &mut Spools<'_>,
-) -> Result<()> {
+fn scan_ways(offset: u64, block: PrimitiveBlock) -> Result<WayScan> {
+    let mut scan = WayScan {
+        offset,
+        keys: Vec::new(),
+        ways: 0,
+        range: None,
+    };
+    let mut refs = Vec::new();
+    for group in block.groups() {
+        for way in group.ways() {
+            scan.range = match scan.range {
+                None => Some((way.id(), way.id())),
+                Some((first, last)) => {
+                    ensure!(way.id() > last, UNSORTED_WAYS);
+                    Some((first, way.id()))
+                }
+            };
+            if !way
+                .tags()
+                .any(|(key, value)| key == "highway" && tags::highway_code(value).is_some())
+            {
+                continue;
+            }
+            scan.ways += 1;
+            refs.clear();
+            refs.extend(way.refs());
+            if refs.is_empty() {
+                continue;
+            }
+            let first = refs[0];
+            let last = *refs.last().unwrap();
+            refs.sort_unstable();
+            refs.dedup(); // Distinct ways, not repeated occurrences within a way.
+            scan.keys.extend(
+                refs.iter()
+                    .map(|&id| (id << 1) | i64::from(id == first || id == last)),
+            );
+        }
+    }
+    Ok(scan)
+}
+
+struct NodeScan {
+    records: Vec<u8>,
+    range: Option<(i64, i64)>,
+}
+
+fn scan_nodes(block: PrimitiveBlock, used: &DiskIndex, nodes_only: bool) -> Result<NodeScan> {
+    let mut scan = NodeScan {
+        records: Vec::new(),
+        range: None,
+    };
+    let mut position = 0;
+    let mut visit = |id: i64, lon: i64, lat: i64| -> Result<()> {
+        scan.range = match scan.range {
+            None => {
+                position = used.lower_bound(id);
+                Some((id, id))
+            }
+            Some((first, last)) => {
+                ensure!(id > last, UNSORTED_NODES);
+                Some((first, id))
+            }
+        };
+        while position < used.len() && used.key(position) >> 1 < id {
+            position += 1;
+        }
+        if position < used.len() && used.key(position) >> 1 == id {
+            scan.records
+                .extend_from_slice(&used.key(position).to_le_bytes());
+            scan.records
+                .extend_from_slice(&(lon as f64 / 1e9).to_le_bytes());
+            scan.records
+                .extend_from_slice(&(lat as f64 / 1e9).to_le_bytes());
+            position += 1;
+        }
+        Ok(())
+    };
+    for element in block.elements() {
+        match element {
+            Element::Node(node) => visit(node.id(), node.nano_lon(), node.nano_lat())?,
+            Element::DenseNode(node) => visit(node.id(), node.nano_lon(), node.nano_lat())?,
+            // A file that lies about its sort order must not silently lose ways.
+            Element::Way(_) | Element::Relation(_) => ensure!(!nodes_only, UNSORTED_FILE),
+        }
+    }
+    Ok(scan)
+}
+
+fn topology(
+    config: &Config,
+    pool: &rayon::ThreadPool,
+    data: &[u64],
+    boundary: usize,
+) -> Result<(Vec<u64>, u64)> {
+    let mut sorter = RefSorter::new(&config.scratch, config.cache_mb << 20);
+    let (mut way_blocks, mut ways, mut last_way) = (Vec::new(), 0, None);
+    pipeline(config, pool, &data[boundary..], scan_ways, |scan| {
+        if let Some((first, last)) = scan.range {
+            ensure!(last_way.is_none_or(|id| first > id), UNSORTED_WAYS);
+            last_way = Some(last);
+            way_blocks.push(scan.offset);
+        }
+        ways += scan.ways;
+        sorter.extend(&scan.keys, pool)
+    })?;
+    let used_path = config.scratch.join("used.idx");
+    sorter.export_used(&used_path, pool)?;
+    let used = DiskIndex::open(&used_path, 8)?;
+    let mut locations = writer(&config.scratch.join("locations.idx"))?;
+    let mut last_node = None;
+    let node_end = if boundary == 0 {
+        data.len()
+    } else {
+        (boundary + 1).min(data.len())
+    };
+    pipeline(
+        config,
+        pool,
+        &data[..node_end],
+        |offset, block| {
+            let nodes_only = boundary > 0 && data.get(boundary).is_none_or(|&end| offset < end);
+            scan_nodes(block, &used, nodes_only)
+        },
+        |scan| {
+            if let Some((first, last)) = scan.range {
+                ensure!(last_node.is_none_or(|id| first > id), UNSORTED_NODES);
+                last_node = Some(last);
+            }
+            locations.write_all(&scan.records)?;
+            Ok(())
+        },
+    )?;
+    locations.flush()?;
+    drop(used);
+    fs::remove_file(used_path)?;
+    Ok((way_blocks, ways))
+}
+
+struct PreparedEdge {
+    u: i64,
+    v: i64,
+    points: Range<usize>,
+    reverse: bool,
+    bbox: [f64; 4],
+}
+
+struct PreparedWay {
+    attributes: [u8; 50],
+    strings: [Option<String>; 5],
+    edges: Range<usize>,
+}
+
+#[derive(Default)]
+struct Prepared {
+    ways: Vec<PreparedWay>,
+    edges: Vec<PreparedEdge>,
+    points: Vec<[f64; 2]>,
+}
+
+fn prepare_way(way: Way<'_>, nodes: &DiskIndex, out: &mut Prepared) -> Result<()> {
     let Some(highway) = way.tags().find_map(|(key, value)| {
         if key == "highway" {
             tags::highway_code(value)
@@ -189,9 +330,10 @@ fn emit_way(
     if refs.len() < 2 {
         return Ok(());
     }
-    let mut geometry = Vec::with_capacity(refs.len());
+    let base = out.points.len();
+    let mut junction = Vec::with_capacity(refs.len());
     for &id in &refs {
-        let point = nodes.location(id).with_context(|| {
+        let (point, is_junction) = nodes.location(id).with_context(|| {
             format!(
                 "Drivable way {} references missing node {id}; use a complete extract",
                 way.id()
@@ -205,7 +347,8 @@ fn emit_way(
             "Drivable way {} has invalid WGS84 coordinates at node {id}",
             way.id()
         );
-        geometry.push(point);
+        out.points.push(point);
+        junction.push(is_junction);
     }
     let tags: Tags = way
         .tags()
@@ -227,17 +370,16 @@ fn emit_way(
             .copy_from_slice(&tags::limit(tags::get(&tags, name), kind).to_le_bytes());
     }
     attributes[29] = tags::flags(&tags);
-    for (i, name) in STRINGS.iter().enumerate() {
-        attributes[30 + i * 4..34 + i * 4]
-            .copy_from_slice(&dictionaries.code(i, tags::get(&tags, name))?.to_le_bytes());
-    }
+    let strings = STRINGS.map(|name| tags::get(&tags, name).map(str::to_owned));
     let direction = tags::direction(&tags);
+    let first_edge = out.edges.len();
     let mut start = 0;
     for end in 1..refs.len() {
-        if !junctions.contains(refs[end]) {
+        if !junction[end] {
             continue;
         }
-        let segment = &geometry[start..=end];
+        let points = base + start..base + end + 1;
+        let segment = &out.points[points.clone()];
         let mut bbox = [180.0f64, 90.0f64, -180.0f64, -90.0f64];
         for point in segment {
             bbox = [
@@ -256,14 +398,44 @@ fn emit_way(
             bbox[2] = 180.0;
         }
         if direction >= 0 {
-            spools.append(refs[start], refs[end], segment, false, &attributes, bbox)?;
+            let (u, v) = (refs[start], refs[end]);
+            out.edges.push(PreparedEdge {
+                u,
+                v,
+                points: points.clone(),
+                reverse: false,
+                bbox,
+            });
         }
         if direction <= 0 {
-            spools.append(refs[end], refs[start], segment, true, &attributes, bbox)?;
+            let (u, v) = (refs[end], refs[start]);
+            out.edges.push(PreparedEdge {
+                u,
+                v,
+                points: points.clone(),
+                reverse: true,
+                bbox,
+            });
         }
         start = end;
     }
+    let edges = first_edge..out.edges.len();
+    out.ways.push(PreparedWay {
+        attributes,
+        strings,
+        edges,
+    });
     Ok(())
+}
+
+fn prepare_block(block: PrimitiveBlock, nodes: &DiskIndex) -> Result<Prepared> {
+    let mut prepared = Prepared::default();
+    for group in block.groups() {
+        for way in group.ways() {
+            prepare_way(way, nodes, &mut prepared)?;
+        }
+    }
+    Ok(prepared)
 }
 
 pub fn run(config: Config) -> Result<String> {
@@ -285,44 +457,48 @@ pub fn run(config: Config) -> Result<String> {
         .build()?;
     let phase = Instant::now();
     log("Pass 1/2: building disk-backed node locations and junction incidence (Rust)");
-    let (source, ways) = topology(&config, &pool)?;
+    let (source, data, boundary) = layout(&config)?;
+    let (way_blocks, ways) = topology(&config, &pool, &data, boundary)?;
     let topology_seconds = phase.elapsed().as_secs_f64();
     let phase = Instant::now();
     log("Pass 2/2: splitting ways and spooling directed edges (Rust)");
-    let nodes = DiskIndex::open(&config.scratch.join("locations.idx"), 24)?;
-    let junctions = DiskIndex::open(&config.scratch.join("junctions.idx"), 8)?;
+    let locations_path = config.scratch.join("locations.idx");
+    let nodes = DiskIndex::open(&locations_path, 24)?;
     let db = database(&config.scratch.join("output.sqlite"), config.cache_mb)?;
     let mut dictionaries = Dictionaries::new(&db)?;
-    let mut spools = Spools::new(&db, &config.scratch, config.degrees)?;
+    let mut spools = Spools::new(&config.scratch, config.degrees, SPOOL_BYTES)?;
     db.execute_batch("BEGIN")?;
-    let mut reader = BlobReader::seekable_from_path(&config.input)?;
-    let offsets_file = File::open(config.scratch.join("ways.blocks"))?;
-    let mut remaining = offsets_file.metadata()?.len() / 8;
-    let mut offsets = BufReader::new(offsets_file);
-    while remaining > 0 {
-        let count = remaining.min(config.threads as u64);
-        let mut blobs = Vec::with_capacity(count as usize);
-        for _ in 0..count {
-            let mut bytes = [0u8; 8];
-            offsets.read_exact(&mut bytes)?;
-            blobs.push(reader.blob_from_offset(ByteOffset(u64::from_le_bytes(bytes)))?);
-        }
-        for block in decode(&blobs, &pool)? {
-            let Block::Data(block) = block else {
-                bail!("Expected way data block");
-            };
-            for group in block.groups() {
-                for way in group.ways() {
-                    emit_way(way, &nodes, &junctions, &mut dictionaries, &mut spools)?;
+    pipeline(
+        &config,
+        &pool,
+        &way_blocks,
+        |_, block| prepare_block(block, &nodes),
+        |prepared| {
+            for way in &prepared.ways {
+                let mut attributes = way.attributes;
+                for (i, value) in way.strings.iter().enumerate() {
+                    let code = dictionaries.code(i, value.as_deref())?;
+                    attributes[30 + i * 4..34 + i * 4].copy_from_slice(&code.to_le_bytes());
+                }
+                for edge in &prepared.edges[way.edges.clone()] {
+                    let segment = &prepared.points[edge.points.clone()];
+                    spools.append(
+                        edge.u,
+                        edge.v,
+                        segment,
+                        edge.reverse,
+                        &attributes,
+                        edge.bbox,
+                    )?;
                 }
             }
-        }
-        remaining -= count;
-    }
+            Ok(())
+        },
+    )?;
     spools.close()?;
     db.execute_batch("COMMIT")?;
     drop(nodes);
-    drop(junctions);
+    fs::remove_file(locations_path)?;
     let edges_seconds = phase.elapsed().as_secs_f64();
     let phase = Instant::now();
     log("Writing memory-mappable columns and manifest (Rust)");

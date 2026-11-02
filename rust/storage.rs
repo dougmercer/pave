@@ -3,8 +3,9 @@ use crate::tags::STRINGS;
 use anyhow::{Result, ensure};
 use lru::LruCache;
 use rusqlite::{Connection, OptionalExtension, params};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::num::NonZeroUsize;
@@ -134,7 +135,7 @@ impl<'a> Dictionaries<'a> {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize)]
 struct TileMeta {
     id: String,
     path: String,
@@ -146,105 +147,96 @@ struct TileMeta {
 
 struct Tile {
     meta: TileMeta,
-    rows: BufWriter<File>,
-    coords: BufWriter<File>,
+    rows: Vec<u8>,
+    coords: Vec<u8>,
 }
 
-pub struct Spools<'a> {
-    db: &'a Connection,
+pub struct Spools {
     scratch: PathBuf,
     degrees: f64,
-    active: LruCache<String, Tile>,
+    max_x: i64,
+    max_y: i64,
+    tiles: HashMap<(i32, i32), Tile>,
+    buffered: usize,
+    limit: usize,
     pub edges: u64,
     pub vertices: u64,
 }
 
-impl<'a> Spools<'a> {
-    pub fn new(db: &'a Connection, scratch: &Path, degrees: f64) -> Result<Self> {
-        db.execute_batch(
-            "CREATE TABLE tiles(id TEXT PRIMARY KEY, x INTEGER, y INTEGER, metadata TEXT)",
-        )?;
+impl Spools {
+    pub fn new(scratch: &Path, degrees: f64, limit: usize) -> Result<Self> {
         Ok(Self {
-            db,
             scratch: scratch.to_owned(),
             degrees,
-            active: LruCache::new(NonZeroUsize::new(32).unwrap()),
+            max_x: (360.0 / degrees).ceil() as i64 - 1,
+            max_y: (180.0 / degrees).ceil() as i64 - 1,
+            tiles: HashMap::new(),
+            buffered: 0,
+            limit,
             edges: 0,
             vertices: 0,
         })
     }
 
-    fn save(&self, mut tile: Tile) -> Result<()> {
-        tile.rows.flush()?;
-        tile.coords.flush()?;
-        self.db
-            .prepare_cached("UPDATE tiles SET metadata=? WHERE id=?")?
-            .execute(params![serde_json::to_string(&tile.meta)?, tile.meta.id])?;
+    fn append_file(path: &Path, bytes: &[u8]) -> Result<()> {
+        OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path)?
+            .write_all(bytes)?;
+        Ok(())
+    }
+
+    /// Write the largest buffers, so each open/close moves as many bytes as possible.
+    fn spill(&mut self, target: usize) -> Result<()> {
+        let mut tiles: Vec<_> = self.tiles.values_mut().collect();
+        tiles.sort_unstable_by_key(|tile| std::cmp::Reverse(tile.rows.len() + tile.coords.len()));
+        for tile in tiles {
+            if self.buffered <= target {
+                break;
+            }
+            let id = &tile.meta.id;
+            if !tile.rows.is_empty() {
+                Self::append_file(&self.scratch.join(format!("{id}.rows")), &tile.rows)?;
+            }
+            if !tile.coords.is_empty() {
+                Self::append_file(&self.scratch.join(format!("{id}.coords")), &tile.coords)?;
+            }
+            self.buffered -= tile.rows.len() + tile.coords.len();
+            tile.rows = Vec::new();
+            tile.coords = Vec::new();
+        }
         Ok(())
     }
 
     pub fn close(&mut self) -> Result<()> {
-        while let Some((_, tile)) = self.active.pop_lru() {
-            self.save(tile)?;
-        }
-        Ok(())
+        self.spill(0)
     }
 
-    fn tile(&mut self, first: [f64; 2]) -> Result<&mut Tile> {
+    fn tile(&mut self, first: [f64; 2]) -> &mut Tile {
         let size = self.degrees;
-        let x = (((first[0] + 180.0) / size).floor() as i64).min((360.0 / size).ceil() as i64 - 1);
-        let y = (((first[1] + 90.0) / size).floor() as i64).min((180.0 / size).ceil() as i64 - 1);
-        let id = format!("{x}_{y}");
-        if !self.active.contains(&id) {
-            if self.active.len() == self.active.cap().get() {
-                let (_, old) = self.active.pop_lru().unwrap();
-                self.save(old)?;
-            }
-            let existing: Option<String> = self
-                .db
-                .prepare_cached("SELECT metadata FROM tiles WHERE id=?")?
-                .query_row([&id], |r| r.get(0))
-                .optional()?;
-            let meta = match existing {
-                Some(raw) => serde_json::from_str(&raw)?,
-                None => {
-                    let meta = TileMeta {
-                        id: id.clone(),
-                        path: format!("tiles/{id}"),
-                        edges: 0,
-                        vertices: 0,
-                        bbox: [180.0, 90.0, -180.0, -90.0],
-                        grid_bbox: [
-                            x as f64 * size - 180.0,
-                            y as f64 * size - 90.0,
-                            ((x + 1) as f64 * size - 180.0).min(180.0),
-                            ((y + 1) as f64 * size - 90.0).min(90.0),
-                        ],
-                    };
-                    self.db
-                        .prepare_cached("INSERT INTO tiles VALUES (?,?,?,?)")?
-                        .execute(params![id, x, y, serde_json::to_string(&meta)?])?;
-                    meta
-                }
-            };
-            let rows = OpenOptions::new()
-                .append(true)
-                .create(true)
-                .open(self.scratch.join(format!("{id}.rows")))?;
-            let coords = OpenOptions::new()
-                .append(true)
-                .create(true)
-                .open(self.scratch.join(format!("{id}.coords")))?;
-            self.active.put(
-                id.clone(),
-                Tile {
-                    meta,
-                    rows: BufWriter::with_capacity(65536, rows),
-                    coords: BufWriter::with_capacity(65536, coords),
+        let x = (((first[0] + 180.0) / size).floor() as i64).min(self.max_x);
+        let y = (((first[1] + 90.0) / size).floor() as i64).min(self.max_y);
+        self.tiles.entry((x as i32, y as i32)).or_insert_with(|| {
+            let id = format!("{x}_{y}");
+            Tile {
+                meta: TileMeta {
+                    path: format!("tiles/{id}"),
+                    id,
+                    edges: 0,
+                    vertices: 0,
+                    bbox: [180.0, 90.0, -180.0, -90.0],
+                    grid_bbox: [
+                        x as f64 * size - 180.0,
+                        y as f64 * size - 90.0,
+                        ((x + 1) as f64 * size - 180.0).min(180.0),
+                        ((y + 1) as f64 * size - 90.0).min(90.0),
+                    ],
                 },
-            );
-        }
-        Ok(self.active.get_mut(&id).unwrap())
+                rows: Vec::new(),
+                coords: Vec::new(),
+            }
+        })
     }
 
     pub fn append(
@@ -261,17 +253,17 @@ impl<'a> Spools<'a> {
         } else {
             geometry[0]
         };
-        let tile = self.tile(first)?;
+        let tile = self.tile(first);
         let mut row = [0u8; ROW_BYTES];
         row[..8].copy_from_slice(&u.to_le_bytes());
         row[8..16].copy_from_slice(&v.to_le_bytes());
         row[16..66].copy_from_slice(attributes);
         row[66..].copy_from_slice(&(geometry.len() as i64).to_le_bytes());
-        tile.rows.write_all(&row)?;
+        tile.rows.extend_from_slice(&row);
         for i in 0..geometry.len() {
             let point = geometry[if reverse { geometry.len() - i - 1 } else { i }];
-            tile.coords.write_all(&point[0].to_le_bytes())?;
-            tile.coords.write_all(&point[1].to_le_bytes())?;
+            tile.coords.extend_from_slice(&point[0].to_le_bytes());
+            tile.coords.extend_from_slice(&point[1].to_le_bytes());
         }
         tile.meta.edges += 1;
         tile.meta.vertices += geometry.len() as u64;
@@ -283,6 +275,10 @@ impl<'a> Spools<'a> {
         ];
         self.edges += 1;
         self.vertices += geometry.len() as u64;
+        self.buffered += ROW_BYTES + geometry.len() * 16;
+        if self.buffered > self.limit {
+            self.spill(self.limit / 2)?;
+        }
         Ok(())
     }
 
@@ -293,15 +289,15 @@ impl<'a> Spools<'a> {
         manifest.write_all(header.trim_end_matches('}').trim_end().as_bytes())?;
         manifest.write_all(b",\n  \"tiles\": [\n")?;
         let mut count = 0u64;
-        let mut stmt = self.db.prepare("SELECT metadata FROM tiles ORDER BY x,y")?;
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            let meta: TileMeta = serde_json::from_str(&row.get::<_, String>(0)?)?;
-            self.finish_tile(out, &meta)?;
+        let mut keys: Vec<_> = self.tiles.keys().copied().collect();
+        keys.sort_unstable();
+        for key in keys {
+            let meta = &self.tiles[&key].meta;
+            self.finish_tile(out, meta)?;
             if count > 0 {
                 manifest.write_all(b",\n")?;
             }
-            serde_json::to_writer(&mut manifest, &meta)?;
+            serde_json::to_writer(&mut manifest, meta)?;
             count += 1;
         }
         manifest.write_all(b"\n  ]\n}\n")?;
