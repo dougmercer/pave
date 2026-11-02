@@ -28,7 +28,7 @@ uv run maturin develop --release
 Options:
 
 ```sh
-prep input.osm.pbf outdir/ --tile-degrees 0.25 --workdir /fast-disk/scratch \
+prep input.osm.pbf outdir/ --tile-degrees 0.1 --workdir /fast-disk/scratch \
     --threads 8 --cache-mb 32 --sort-mb 64 --spool-mb 64
 ```
 
@@ -94,17 +94,13 @@ roads = read_bbox("outdir", 6.0, 49.5, 6.3, 49.8, columns=("u", "v", "vertices",
 ```
 
 Columns, tile envelopes, and dictionaries stay open between calls for up to four
-datasets, and are refreshed when a dataset is replaced. Each open dataset holds 26
+datasets, and are refreshed when a dataset is replaced. Each open dataset holds 38
 file descriptors, however many tiles it has or you keep.
 
-Extra tiles cost almost nothing to read, and smaller tiles return fewer unwanted
-edges, so `--tile-degrees 0.05` suits country-sized extracts. Avoid it at planet
-scale, where the JSON tile list in `manifest.json` would become very large.
-
-Empty results have `vertices.shape == (0, 2)`, `offsets == [0]`, and empty edge
-columns with the normal dtypes. Bounding boxes use inclusive intersection;
-`west > east` represents an antimeridian-crossing query. Results contain **whole
-intersecting tiles**, without clipping or exact per-edge filtering.
+The default 0.1° tiles balance three costs. Larger tiles make every query return
+more edges for the caller to process. Smaller tiles add time scanning tile envelopes
+on each read and parsing the JSON tile list when a process first opens a dataset,
+which took 0.26 s for South America at 0.1° and 0.81 s at 0.05°.
 
 ## Version 2 storage contract
 
@@ -217,25 +213,28 @@ every node reference from a drivable way, producing a sorted list of the nodes
 those ways use, each marked as a junction or a shape point. The second scans node
 blocks and keeps only those nodes in a sorted location file, with the junction bit
 in the same record. Drivable ways reference about 8-16% of an extract's nodes, so
-this index stays far smaller than one covering every node. The third scans way
-blocks again, resolves locations through a memory map, and spools directed edges
-by tile. Decoding and per-block work happen on the worker threads, in order.
+this index stays far smaller than one covering every node. Barrier and limit tags
+on those nodes go in a second small index. The third scans way blocks again,
+resolves locations through a memory map, and spools directed edges into one log
+with a list of chunks per tile, so tile count adds no scratch files. Decoding and
+per-block work happen on the worker threads, in order.
 
 The native process keeps bounded PBF batches, one sort run (`--sort-mb`), buffered
-tile output (`--spool-mb`), a SQLite cache (`--cache-mb`), an 8,192-entry string
-cache, and 32,768 rows per column-conversion chunk. Global dictionaries live in
-SQLite. Tile metadata stays in RAM, which scales with the tile count and not the
-extract size. No complete extract, topology hash map, or tile's complete geometry
+tile output (`--spool-mb`), a SQLite cache (`--cache-mb`), and an 8,192-entry string
+cache. Global dictionaries live in SQLite. Tile metadata and each tile's list of
+spool chunks stay in RAM, which scales with the tile count and flushes rather than
+the extract size, as does the small table of distinct barrier values. No complete extract, topology hash map, or tile's complete geometry
 is accumulated in application RAM. Memory-mapped index pages are demand-paged by
 the OS, so observed RSS includes resident file-backed pages.
 
 Budget scratch disk for the sorted runs (8 bytes per reference), used-node list
-(8 bytes per used node), location index (24 bytes per used node), dictionary
-database, edge spools, and output. Geometry spools use 16 bytes per directed vertex
-and row spools use 74 bytes per edge. Final edge columns use 74 bytes per edge plus
-16 bytes per directed vertex, dictionaries, and small `.npy` headers. Runs, the
-used-node list, and the location index are deleted as soon as each pass finishes,
-and tile spools as their columns are finalized.
+(8 bytes per used node), location index (24 bytes per used node, plus 24 per node
+with a barrier or limit), dictionary database, spool log, and output. The spool log
+uses 16 bytes per directed vertex and 98 bytes per edge. Final edge columns use 98
+bytes per edge plus 16 bytes per directed vertex, dictionaries, and small `.npy`
+headers. Runs, the used-node list, and the location indexes are deleted as soon as
+each pass finishes; the spool log lasts until the columns are written, so peak
+scratch is about the size of the output plus the output itself.
 
 ## Tests and benchmarks
 

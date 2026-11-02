@@ -21,7 +21,7 @@ def preprocess(
     input_path: str | Path,
     outdir: str | Path,
     *,
-    tile_degrees: float = 0.25,
+    tile_degrees: float = 0.1,
     workdir: str | Path | None = None,
     cache_mb: int = 32,
     sort_mb: int = 64,

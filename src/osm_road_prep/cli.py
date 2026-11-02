@@ -11,7 +11,7 @@ def main(argv=None) -> int:
     )
     parser.add_argument("input", help="Input .osm.pbf snapshot")
     parser.add_argument("outdir", help="New or empty output directory")
-    parser.add_argument("--tile-degrees", type=float, default=0.25)
+    parser.add_argument("--tile-degrees", type=float, default=0.1, help="Tile size (default: 0.1)")
     parser.add_argument(
         "--workdir", help="Scratch directory for indexes and spools (default: beside outdir)"
     )
