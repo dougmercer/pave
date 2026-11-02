@@ -1,7 +1,7 @@
 //! The parts of the OSM PBF format that preprocessing reads. Blocks are walked where they
 //! lie, because copying every element out of them dominated the cost of decoding a file.
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use flate2::{Decompress, FlushDecompress};
+use flate2::{Decompress, FlushDecompress, Status};
 use std::cell::RefCell;
 use std::fs::File;
 use std::ops::Range;
@@ -168,14 +168,14 @@ impl Pbf {
             static INFLATE: RefCell<Decompress> = RefCell::new(Decompress::new(true));
         }
         let mut data = vec![0; size];
-        let written = INFLATE.with_borrow_mut(|inflate| -> Result<usize> {
+        let exact = INFLATE.with_borrow_mut(|inflate| -> Result<bool> {
             inflate.reset(true);
-            inflate
+            let status = inflate
                 .decompress(zlib, &mut data, FlushDecompress::Finish)
                 .map_err(|error| anyhow!("Invalid compressed PBF blob: {error}"))?;
-            Ok(inflate.total_out() as usize)
+            Ok(status == Status::StreamEnd && inflate.total_out() == size as u64)
         })?;
-        ensure!(written == size, "PBF blob is shorter than it claims");
+        ensure!(exact, "PBF blob does not match its stated size");
         Ok(data)
     }
 

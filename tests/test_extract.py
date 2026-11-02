@@ -285,6 +285,60 @@ def test_damaged_files_fail_cleanly(pbf, tmp_path, damage):
     assert not out.exists()
 
 
+def rewrite_first_data_blob_size(path, size):
+    """Change a PBF's first data blob to state `size` uncompressed bytes, or none at all."""
+
+    def varint(value):
+        encoded = bytearray()
+        while value > 127:
+            encoded.append(value & 127 | 128)
+            value >>= 7
+        return bytes([*encoded, value])
+
+    def read_varint(data, position):
+        value = shift = 0
+        while True:
+            byte = data[position]
+            position += 1
+            value |= (byte & 127) << shift
+            shift += 7
+            if byte < 128:
+                return value, position
+
+    data = path.read_bytes()
+    start = 0
+    while True:
+        header_size = int.from_bytes(data[start : start + 4], "big")
+        header = data[start + 4 : start + 4 + header_size]
+        position = header.rindex(b"\x18") + 1  # Field 3, datasize, comes last.
+        blob_size, _ = read_varint(header, position)
+        blob_start = start + 4 + header_size
+        if b"OSMData" in header:
+            break
+        start = blob_start + blob_size
+    blob = data[blob_start : blob_start + blob_size]
+    assert blob[0] == 0x10  # Field 2, raw_size, comes first, then the compressed data.
+    stated, rest = read_varint(blob, 1)
+    new_blob = blob[rest:] if size is None else b"\x10" + varint(stated + size) + blob[rest:]
+    new_header = header[: position - 1] + b"\x18" + varint(len(new_blob))
+    path.write_bytes(
+        data[:start]
+        + len(new_header).to_bytes(4, "big")
+        + new_header
+        + new_blob
+        + data[blob_start + blob_size :]
+    )
+
+
+@pytest.mark.parametrize("size", [None, -100, 100])
+def test_blob_that_misstates_its_size_is_fatal(pbf, tmp_path, size):
+    nodes = {i: (i * 0.001, 0) for i in range(1, 200)}
+    path = pbf(nodes, [(1, list(nodes), {"highway": "road"})])
+    rewrite_first_data_blob_size(path, size)
+    with pytest.raises(ValueError, match="stated size"):
+        preprocess(path, tmp_path / "roads")
+
+
 def test_empty_graph_missing_timestamp_and_ignored_relations(pbf, tmp_path):
     path = pbf(
         {1: (0, 0)},
