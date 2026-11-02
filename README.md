@@ -218,8 +218,8 @@ on those nodes go in a second small index. The third scans way blocks again,
 resolves locations through a memory map, and spools directed edges into one log
 with a list of chunks per tile, so tile count adds no scratch files. Decoding and
 per-block work happen on the worker threads, in order. Writing columns reads those
-chunks back concurrently, because the page cache may have evicted the log by then
-and each evicted chunk is a separate disk read.
+chunks back concurrently, because the page cache may have evicted the log by then.
+Each spill is written in tile order, so neighbouring tiles' chunks can share a read.
 
 The native process keeps bounded PBF batches, one sort run (`--sort-mb`), and buffered
 tile output (`--spool-mb`). Dictionaries of distinct strings stay in RAM, which grows

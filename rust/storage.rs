@@ -173,14 +173,25 @@ impl Spools {
         })
     }
 
-    /// Log the largest buffers first, so each chunk moves as many bytes as possible.
+    /// Log the largest buffers, so each chunk moves as many bytes as possible, in tile order,
+    /// so the chunks that later read back together sit close together in the log.
     fn spill(&mut self, target: usize) -> Result<()> {
-        let mut tiles: Vec<_> = self.tiles.values_mut().collect();
-        tiles.sort_unstable_by_key(|tile| std::cmp::Reverse(tile.rows.len() + tile.coords.len()));
-        for tile in tiles {
-            if self.buffered <= target {
-                break;
-            }
+        let mut tiles: Vec<_> = self.tiles.iter_mut().collect();
+        tiles.sort_unstable_by_key(|(_, tile)| {
+            std::cmp::Reverse(tile.rows.len() + tile.coords.len())
+        });
+        let mut buffered = self.buffered;
+        let count = tiles
+            .iter()
+            .take_while(|(_, tile)| {
+                let spill = buffered > target;
+                buffered -= (tile.rows.len() + tile.coords.len()).min(buffered);
+                spill
+            })
+            .count();
+        tiles.truncate(count);
+        tiles.sort_unstable_by_key(|(key, _)| **key);
+        for (_, tile) in tiles {
             let bytes = tile.rows.len() + tile.coords.len();
             tile.chunks.push(Chunk {
                 start: self.log_bytes,
@@ -276,18 +287,35 @@ impl Spools {
     }
 
     /// Read chunks concurrently, because a chunk evicted from the page cache costs a disk read.
+    /// Chunks adjacent in the log share one read. Returns where each landed in `buffer`.
     fn read_chunks(
         log: &File,
         chunks: &[&Chunk],
         buffer: &mut Vec<u8>,
         pool: &rayon::ThreadPool,
-    ) -> Result<()> {
-        buffer.resize(chunks.iter().map(|chunk| chunk.size()).sum(), 0);
+    ) -> Result<Vec<usize>> {
+        let mut order: Vec<_> = (0..chunks.len()).collect();
+        order.sort_unstable_by_key(|&i| chunks[i].start);
+        let mut places = vec![0; chunks.len()];
+        let mut extents: Vec<(u64, usize)> = Vec::new();
+        let mut size = 0;
+        for i in order {
+            let chunk = chunks[i];
+            places[i] = size;
+            size += chunk.size();
+            match extents.last_mut() {
+                Some((start, length)) if *start + *length as u64 == chunk.start => {
+                    *length += chunk.size()
+                }
+                _ => extents.push((chunk.start, chunk.size())),
+            }
+        }
+        buffer.resize(size, 0);
         let mut unread = buffer.as_mut_slice();
-        let mut reads = Vec::with_capacity(chunks.len());
-        for chunk in chunks {
-            let (bytes, rest) = unread.split_at_mut(chunk.size());
-            reads.push((bytes, chunk.start));
+        let mut reads = Vec::with_capacity(extents.len());
+        for (start, length) in extents {
+            let (bytes, rest) = unread.split_at_mut(length);
+            reads.push((bytes, start));
             unread = rest;
         }
         pool.install(|| {
@@ -295,7 +323,7 @@ impl Spools {
                 .into_par_iter()
                 .try_for_each(|(bytes, start)| log.read_exact_at(bytes, start))
         })?;
-        Ok(())
+        Ok(places)
     }
 
     pub fn finish(
@@ -349,10 +377,11 @@ impl Spools {
                 .iter()
                 .flat_map(|key| &self.tiles[key].chunks)
                 .collect();
-            Self::read_chunks(&log, &chunks, &mut buffer, pool)?;
+            let places = Self::read_chunks(&log, &chunks, &mut buffer, pool)?;
             position = Self::write_columns(
                 &buffer,
                 &chunks,
+                &places,
                 &mut columns,
                 &mut offsets,
                 &mut vertices,
@@ -389,24 +418,21 @@ impl Spools {
 
     /// Append spooled chunks to the shared columns, returning the next vertex position.
     /// Every file has its own writer, so they fill at once; offsets stay global across tiles.
+    #[allow(clippy::too_many_arguments)]
     fn write_columns(
         spool: &[u8],
         chunks: &[&Chunk],
+        places: &[usize],
         columns: &mut [BufWriter<File>],
         offsets: &mut BufWriter<File>,
         vertices: &mut BufWriter<File>,
         mut position: i64,
         pool: &rayon::ThreadPool,
     ) -> Result<i64> {
-        let mut unread = spool;
         let parts: Vec<_> = chunks
             .iter()
-            .map(|chunk| {
-                let (rows, rest) = unread.split_at(chunk.rows);
-                let (coords, rest) = rest.split_at(chunk.coords);
-                unread = rest;
-                (rows, coords)
-            })
+            .zip(places)
+            .map(|(chunk, &place)| spool[place..place + chunk.size()].split_at(chunk.rows))
             .collect();
         let rows = || {
             parts
