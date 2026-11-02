@@ -1,5 +1,4 @@
 use regex::Regex;
-use std::collections::HashMap;
 use std::sync::LazyLock;
 
 pub const HIGHWAYS: [&str; 16] = [
@@ -32,17 +31,19 @@ pub const STRINGS: [&str; 8] = [
 ];
 /// `STRINGS` read from way tags; the rest come from nodes along the edge.
 pub const WAY_STRINGS: usize = 6;
-pub type Tags = HashMap<String, String>;
+/// One way's tags. Ways have few, so searching a list beats building a map for each.
+pub type Tags<'a> = [(&'a str, &'a str)];
 
-pub fn highway_code(value: &str) -> Option<u8> {
+pub fn highway_code(value: &[u8]) -> Option<u8> {
     HIGHWAYS
         .iter()
-        .position(|&name| name == value)
+        .position(|name| name.as_bytes() == value)
         .map(|i| i as u8)
 }
 
-pub fn get<'a>(tags: &'a Tags, key: &str) -> Option<&'a str> {
-    tags.get(key).map(String::as_str)
+pub fn get<'a>(tags: &Tags<'a>, key: &str) -> Option<&'a str> {
+    let found = tags.iter().rev().find(|(name, _)| *name == key);
+    found.map(|(_, value)| *value)
 }
 
 static SCALAR: LazyLock<Regex> = LazyLock::new(|| {
@@ -108,7 +109,7 @@ fn default_width(highway: &str) -> f64 {
     }
 }
 
-pub fn width(tags: &Tags) -> f64 {
+pub fn width(tags: &Tags<'_>) -> f64 {
     let width = scalar(get(tags, "width"), "length");
     if width > 0.0 {
         return width;
@@ -132,7 +133,7 @@ pub fn width(tags: &Tags) -> f64 {
     }
 }
 
-pub fn direction(tags: &Tags) -> i8 {
+pub fn direction(tags: &Tags<'_>) -> i8 {
     match get(tags, "oneway")
         .unwrap_or("")
         .trim()
@@ -154,7 +155,7 @@ pub fn direction(tags: &Tags) -> i8 {
     }
 }
 
-pub fn flags(tags: &Tags) -> u8 {
+pub fn flags(tags: &Tags<'_>) -> u8 {
     let mut result = 0;
     for (name, bit, present) in [("bridge", 1, 4), ("tunnel", 2, 8)] {
         if let Some(value) = get(tags, name) {

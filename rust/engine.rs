@@ -1,11 +1,11 @@
 use crate::index::{
     LOCATION_BYTES, NodeIds, NodeIndex, NodeTagIndex, NodeTags, location_record, writer,
 };
+use crate::pbf::{Blob, Block, Header, Node, Pbf, Way};
 use crate::storage::{Attributes, COLUMNS, Dictionaries, STRING_SLOTS, Spools};
-use crate::tags::{self, HIGHWAYS, STRINGS, Tags, WAY_STRINGS};
+use crate::tags::{self, HIGHWAYS, STRINGS, WAY_STRINGS};
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, SecondsFormat};
-use osmpbf::{BlobReader, BlobType, ByteOffset, Element, HeaderBlock, PrimitiveBlock, Way};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -34,33 +34,31 @@ pub struct Config {
 }
 
 /// Run `work` on the decode pool, feeding results to `consume` in source order.
-/// Blocks are decoded, transformed and dropped by workers; the caller only does ordered I/O.
+/// Blocks are read, decoded, transformed and dropped by workers; the caller only does ordered I/O.
 fn pipeline<T: Send>(
+    pbf: &Pbf,
     config: &Config,
     pool: &rayon::ThreadPool,
-    offsets: &[u64],
-    work: impl Fn(u64, PrimitiveBlock) -> Result<T> + Sync,
+    blobs: &[Blob],
+    work: impl Fn(Blob, Block) -> Result<T> + Sync,
     mut consume: impl FnMut(T) -> Result<()>,
 ) -> Result<()> {
     // One result slot per block in flight, so a slow block never idles the other workers.
     let (sender, receiver) = sync_channel::<Receiver<Result<T>>>(config.threads * 2);
     let work = &work;
     std::thread::scope(|scope| {
-        let producer = scope.spawn(move || -> Result<()> {
-            let mut reader = BlobReader::seekable_from_path(&config.input)?;
+        let producer = scope.spawn(move || {
             pool.in_place_scope(|tasks| {
-                for &offset in offsets {
-                    let blob = reader.blob_from_offset(ByteOffset(offset))?;
+                for &blob in blobs {
                     let (result, slot) = sync_channel(1);
                     if sender.send(slot).is_err() {
                         break;
                     }
                     tasks.spawn(move |_| {
-                        let block = blob.to_primitiveblock().map_err(Into::into);
-                        let _ = result.send(block.and_then(|block| work(offset, block)));
+                        let block = pbf.block(blob);
+                        let _ = result.send(block.and_then(|block| work(blob, block)));
                     });
                 }
-                Ok(())
             })
         });
         let consumed = (|| {
@@ -72,30 +70,18 @@ fn pipeline<T: Send>(
             }
             Ok(())
         })();
-        let produced = producer.join().expect("decode thread panicked");
-        consumed.and(produced)
+        producer.join().expect("decode thread panicked");
+        consumed
     })
 }
 
 /// Stream blob headers, read the OSM header, and find where node blocks end.
-fn layout(config: &Config) -> Result<(Value, Vec<u64>, usize)> {
-    let mut reader = BlobReader::seekable_from_path(&config.input)?;
-    let (mut header, mut data) = (None, Vec::new());
-    while let Some(entry) = reader.next_header_skip_blob() {
-        let (blob_header, offset) = entry?;
-        let offset = offset.context("PBF reader has no byte offset")?.0;
-        match blob_header.blob_type() {
-            BlobType::OsmHeader => header = header.or(Some(offset)),
-            BlobType::OsmData => data.push(offset),
-            BlobType::Unknown(_) => (),
-        }
-    }
-    let header = reader
-        .blob_from_offset(ByteOffset(header.context("No OSM header in input PBF")?))?
-        .to_headerblock()?;
-    let source = source_header(&header, &config.input)?;
+fn layout(pbf: &Pbf, path: &Path) -> Result<(Value, Vec<Blob>, usize)> {
+    let (header, data) = pbf.blobs()?;
+    let header = pbf.header(header.context("No OSM header in input PBF")?)?;
+    let source = source_header(&header, path)?;
     let sorted = header
-        .optional_features()
+        .optional_features
         .iter()
         .any(|f| f == "Sort.Type_then_ID");
     // Sorted files keep nodes first, so the node/way boundary can be found by bisection.
@@ -104,24 +90,18 @@ fn layout(config: &Config) -> Result<(Value, Vec<u64>, usize)> {
         let mut high = data.len();
         while boundary < high {
             let mid = boundary + (high - boundary) / 2;
-            let block = reader
-                .blob_from_offset(ByteOffset(data[mid]))?
-                .to_primitiveblock()?;
-            let only_nodes = !block
-                .groups()
-                .any(|group| group.ways().next().is_some() || group.relations().next().is_some());
-            if only_nodes {
-                boundary = mid + 1;
-            } else {
+            if pbf.block(data[mid])?.has_ways_or_relations()? {
                 high = mid;
+            } else {
+                boundary = mid + 1;
             }
         }
     }
     Ok((source, data, boundary))
 }
 
-fn source_header(header: &HeaderBlock, path: &Path) -> Result<Value> {
-    for feature in header.required_features() {
+fn source_header(header: &Header, path: &Path) -> Result<Value> {
+    for feature in &header.required_features {
         ensure!(
             feature != "HistoricalInformation",
             "History PBF is unsupported; provide a snapshot extract"
@@ -132,7 +112,7 @@ fn source_header(header: &HeaderBlock, path: &Path) -> Result<Value> {
         );
     }
     let timestamp = header
-        .osmosis_replication_timestamp()
+        .replication_timestamp
         .map(|seconds| {
             DateTime::from_timestamp(seconds, 0)
                 .context("Invalid replication timestamp in PBF header")
@@ -143,51 +123,57 @@ fn source_header(header: &HeaderBlock, path: &Path) -> Result<Value> {
         "file": path.file_name().unwrap_or_default().to_string_lossy(),
         "size_bytes": fs::metadata(path)?.len(), "timestamp": timestamp,
         "timestamp_source": if timestamp.is_some() { Some("pbf_header") } else { None },
-        "generator": header.writing_program(),
+        "generator": header.writing_program,
     }))
 }
 
+/// The drivable class of a way, if it has one.
+fn highway(way: &Way<'_>) -> Option<u8> {
+    way.tags().find_map(|(key, value)| {
+        if key == b"highway" {
+            tags::highway_code(value)
+        } else {
+            None
+        }
+    })
+}
+
 struct WayScan {
-    offset: u64,
+    blob: Blob,
     ways: u64,
     range: Option<(i64, i64)>,
 }
 
-fn scan_ways(offset: u64, block: PrimitiveBlock, ids: &NodeIds) -> Result<WayScan> {
+fn scan_ways(blob: Blob, block: Block, ids: &NodeIds) -> Result<WayScan> {
     let mut scan = WayScan {
-        offset,
+        blob,
         ways: 0,
         range: None,
     };
     let mut refs = Vec::new();
-    for group in block.groups() {
-        for way in group.ways() {
-            scan.range = match scan.range {
-                None => Some((way.id(), way.id())),
-                Some((first, last)) => {
-                    ensure!(way.id() > last, UNSORTED_WAYS);
-                    Some((first, way.id()))
-                }
-            };
-            if !way
-                .tags()
-                .any(|(key, value)| key == "highway" && tags::highway_code(value).is_some())
-            {
-                continue;
+    for way in block.ways() {
+        let way = way?;
+        scan.range = match scan.range {
+            None => Some((way.id, way.id)),
+            Some((first, last)) => {
+                ensure!(way.id > last, UNSORTED_WAYS);
+                Some((first, way.id))
             }
-            scan.ways += 1;
-            refs.clear();
-            refs.extend(way.refs());
-            if refs.is_empty() {
-                continue;
-            }
-            let first = refs[0];
-            let last = *refs.last().unwrap();
-            refs.sort_unstable();
-            refs.dedup(); // Distinct ways, not repeated occurrences within a way.
-            for &id in &refs {
-                ids.mark(id, id == first || id == last);
-            }
+        };
+        if highway(&way).is_none() {
+            continue;
+        }
+        scan.ways += 1;
+        way.read_refs(&mut refs)?;
+        if refs.is_empty() {
+            continue;
+        }
+        let first = refs[0];
+        let last = *refs.last().unwrap();
+        refs.sort_unstable();
+        refs.dedup(); // Distinct ways, not repeated occurrences within a way.
+        for &id in &refs {
+            ids.mark(id, id == first || id == last);
         }
     }
     Ok(scan)
@@ -219,14 +205,8 @@ fn read_node_tags<'a>(
 }
 
 impl NodeScan {
-    fn visit<'a>(
-        &mut self,
-        ids: &NodeIds,
-        id: i64,
-        lon: i64,
-        lat: i64,
-        node_tags: impl Iterator<Item = (&'a str, &'a str)>,
-    ) -> Result<()> {
+    fn visit(&mut self, ids: &NodeIds, node: Node<'_>) -> Result<()> {
+        let id = node.id;
         self.range = match self.range {
             None => Some((id, id)),
             Some((first, last)) => {
@@ -237,8 +217,8 @@ impl NodeScan {
         let Some((rank, _)) = ids.rank(id) else {
             return Ok(());
         };
-        let found = read_node_tags(node_tags);
-        let record = location_record(lon, lat, found.is_some());
+        let found = read_node_tags(node.tags.text());
+        let record = location_record(node.lon, node.lat, found.is_some());
         if let Some((barrier, limits)) = found {
             self.tagged.push((id, barrier, limits));
         }
@@ -254,57 +234,52 @@ impl NodeScan {
     }
 }
 
-fn scan_nodes(block: PrimitiveBlock, ids: &NodeIds, nodes_only: bool) -> Result<NodeScan> {
+fn scan_nodes(block: Block, ids: &NodeIds, nodes_only: bool) -> Result<NodeScan> {
+    // A file that lies about its sort order must not silently lose ways.
+    ensure!(
+        !nodes_only || !block.has_ways_or_relations()?,
+        UNSORTED_FILE
+    );
     let mut scan = NodeScan::default();
-    for element in block.elements() {
-        match element {
-            Element::Node(node) => {
-                let (id, lon, lat) = (node.id(), node.nano_lon(), node.nano_lat());
-                scan.visit(ids, id, lon, lat, node.tags())?
-            }
-            Element::DenseNode(node) => {
-                let (id, lon, lat) = (node.id(), node.nano_lon(), node.nano_lat());
-                scan.visit(ids, id, lon, lat, node.tags())?
-            }
-            // A file that lies about its sort order must not silently lose ways.
-            Element::Way(_) | Element::Relation(_) => ensure!(!nodes_only, UNSORTED_FILE),
-        }
-    }
+    block.nodes(|node| scan.visit(ids, node))?;
     Ok(scan)
 }
 
 /// The lowest and highest node IDs. Sorted files keep them in the blocks at each end of
 /// their nodes; other files can have them anywhere.
 fn node_id_range(
+    pbf: &Pbf,
     config: &Config,
     pool: &rayon::ThreadPool,
-    data: &[u64],
+    data: &[Blob],
     boundary: usize,
 ) -> Result<Option<(i64, i64)>> {
-    let blocks: Vec<u64> = if boundary == 0 {
+    let blobs: Vec<Blob> = if boundary == 0 {
         data.to_vec()
     } else {
         let ends = [0, boundary - 1, boundary];
         ends.iter().filter_map(|&i| data.get(i).copied()).collect()
     };
-    let mut range: Option<(i64, i64)> = None;
+    let widen = |range: Option<(i64, i64)>, low: i64, high: i64| {
+        Some(range.map_or((low, high), |(a, b)| (a.min(low), b.max(high))))
+    };
+    let mut range = None;
     pipeline(
+        pbf,
         config,
         pool,
-        &blocks,
+        &blobs,
         |_, block| {
-            let ids = block.elements().filter_map(|element| match element {
-                Element::Node(node) => Some(node.id()),
-                Element::DenseNode(node) => Some(node.id()),
-                Element::Way(_) | Element::Relation(_) => None,
-            });
-            Ok(ids.fold(None, |range: Option<(i64, i64)>, id| {
-                Some(range.map_or((id, id), |(low, high)| (low.min(id), high.max(id))))
-            }))
+            let mut range = None;
+            block.nodes(|node| {
+                range = widen(range, node.id, node.id);
+                Ok(())
+            })?;
+            Ok(range)
         },
         |found| {
             if let Some((low, high)) = found {
-                range = Some(range.map_or((low, high), |(a, b)| (a.min(low), b.max(high))));
+                range = widen(range, low, high);
             }
             Ok(())
         },
@@ -313,24 +288,26 @@ fn node_id_range(
 }
 
 fn topology(
+    pbf: &Pbf,
     config: &Config,
     pool: &rayon::ThreadPool,
-    data: &[u64],
+    data: &[Blob],
     boundary: usize,
-) -> Result<(Vec<u64>, u64, NodeIds, Vec<String>)> {
-    let (first, last) = node_id_range(config, pool, data, boundary)?.unwrap_or((0, 0));
+) -> Result<(Vec<Blob>, u64, NodeIds, Vec<String>)> {
+    let (first, last) = node_id_range(pbf, config, pool, data, boundary)?.unwrap_or((0, 0));
     let mut ids = NodeIds::new(first, last)?;
     let (mut way_blocks, mut ways, mut last_way) = (Vec::new(), 0, None);
     pipeline(
+        pbf,
         config,
         pool,
         &data[boundary..],
-        |offset, block| scan_ways(offset, block, &ids),
+        |blob, block| scan_ways(blob, block, &ids),
         |scan| {
             if let Some((first, last)) = scan.range {
                 ensure!(last_way.is_none_or(|id| first > id), UNSORTED_WAYS);
                 last_way = Some(last);
-                way_blocks.push(scan.offset);
+                way_blocks.push(scan.blob);
             }
             ways += scan.ways;
             Ok(())
@@ -349,11 +326,15 @@ fn topology(
         (boundary + 1).min(data.len())
     };
     pipeline(
+        pbf,
         config,
         pool,
         &data[..node_end],
-        |offset, block| {
-            let nodes_only = boundary > 0 && data.get(boundary).is_none_or(|&end| offset < end);
+        |blob, block| {
+            let nodes_only = boundary > 0
+                && data
+                    .get(boundary)
+                    .is_none_or(|end| blob.offset < end.offset);
             scan_nodes(block, &ids, nodes_only)
         },
         |scan| {
@@ -425,16 +406,11 @@ fn length_m(points: &[[f64; 2]]) -> f64 {
 }
 
 fn prepare_way(way: Way<'_>, lookups: &Lookups<'_>, out: &mut Prepared) -> Result<()> {
-    let Some(highway) = way.tags().find_map(|(key, value)| {
-        if key == "highway" {
-            tags::highway_code(value)
-        } else {
-            None
-        }
-    }) else {
+    let Some(highway) = highway(&way) else {
         return Ok(());
     };
-    let refs: Vec<_> = way.refs().collect();
+    let mut refs = Vec::new();
+    way.read_refs(&mut refs)?;
     if refs.len() < 2 {
         return Ok(());
     }
@@ -445,7 +421,7 @@ fn prepare_way(way: Way<'_>, lookups: &Lookups<'_>, out: &mut Prepared) -> Resul
         let location = lookups.nodes.location(id).with_context(|| {
             format!(
                 "Drivable way {} references missing node {id}; use a complete extract",
-                way.id()
+                way.id
             )
         })?;
         let point = location.point;
@@ -455,7 +431,7 @@ fn prepare_way(way: Way<'_>, lookups: &Lookups<'_>, out: &mut Prepared) -> Resul
                 && point[0].abs() <= 180.0
                 && point[1].abs() <= 90.0,
             "Drivable way {} has invalid WGS84 coordinates at node {id}",
-            way.id()
+            way.id
         );
         out.points.push(point);
         junction.push(location.junction);
@@ -465,13 +441,11 @@ fn prepare_way(way: Way<'_>, lookups: &Lookups<'_>, out: &mut Prepared) -> Resul
             None
         });
     }
-    let tags: Tags = way
-        .tags()
-        .map(|(key, value)| (key.to_owned(), value.to_owned()))
-        .collect();
+    let tags: Vec<_> = way.tags().text().collect();
+    let tags = tags.as_slice();
     let mut attributes: Attributes = [0; size_of::<Attributes>()];
-    attributes[..8].copy_from_slice(&way.id().to_le_bytes());
-    attributes[8..16].copy_from_slice(&tags::width(&tags).to_le_bytes());
+    attributes[..8].copy_from_slice(&way.id.to_le_bytes());
+    attributes[8..16].copy_from_slice(&tags::width(tags).to_le_bytes());
     attributes[16] = highway;
     for (offset, name, kind) in [
         (21, "maxweight", "weight"),
@@ -480,9 +454,9 @@ fn prepare_way(way: Way<'_>, lookups: &Lookups<'_>, out: &mut Prepared) -> Resul
         (58, "maxlength", "length"),
     ] {
         attributes[offset..offset + 4]
-            .copy_from_slice(&tags::limit(tags::get(&tags, name), kind).to_le_bytes());
+            .copy_from_slice(&tags::limit(tags::get(tags, name), kind).to_le_bytes());
     }
-    let speed = |key| tags::limit(tags::get(&tags, key), "speed");
+    let speed = |key| tags::limit(tags::get(tags, key), "speed");
     let directed_speed = |key| {
         let value = speed(key);
         if value.is_nan() {
@@ -493,15 +467,15 @@ fn prepare_way(way: Way<'_>, lookups: &Lookups<'_>, out: &mut Prepared) -> Resul
     };
     let forward_speed = directed_speed("maxspeed:forward");
     let backward_speed = directed_speed("maxspeed:backward");
-    attributes[29] = tags::flags(&tags);
-    let strings = std::array::from_fn(|i| tags::get(&tags, STRINGS[i]).map(str::to_owned));
-    let limit = |name, kind| tags::limit(tags::get(&tags, name), kind);
+    attributes[29] = tags::flags(tags);
+    let strings = std::array::from_fn(|i| tags::get(tags, STRINGS[i]).map(str::to_owned));
+    let limit = |name, kind| tags::limit(tags::get(tags, name), kind);
     let way_limits = [
         limit("maxheight", "length"),
         limit("maxweight", "weight"),
         limit("maxwidth", "length"),
     ];
-    let direction = tags::direction(&tags);
+    let direction = tags::direction(tags);
     let first_edge = out.edges.len();
     let mut start = 0;
     for end in 1..refs.len() {
@@ -585,12 +559,10 @@ fn prepare_way(way: Way<'_>, lookups: &Lookups<'_>, out: &mut Prepared) -> Resul
     Ok(())
 }
 
-fn prepare_block(block: PrimitiveBlock, lookups: &Lookups<'_>) -> Result<Prepared> {
+fn prepare_block(block: Block, lookups: &Lookups<'_>) -> Result<Prepared> {
     let mut prepared = Prepared::default();
-    for group in block.groups() {
-        for way in group.ways() {
-            prepare_way(way, lookups, &mut prepared)?;
-        }
+    for way in block.ways() {
+        prepare_way(way?, lookups, &mut prepared)?;
     }
     Ok(prepared)
 }
@@ -614,8 +586,9 @@ pub fn run(config: Config) -> Result<String> {
         .build()?;
     let phase = Instant::now();
     log("Pass 1/2: building disk-backed node locations and junction incidence (Rust)");
-    let (source, data, boundary) = layout(&config)?;
-    let (way_blocks, ways, ids, barriers) = topology(&config, &pool, &data, boundary)?;
+    let pbf = Pbf::open(&config.input)?;
+    let (source, data, boundary) = layout(&pbf, &config.input)?;
+    let (way_blocks, ways, ids, barriers) = topology(&pbf, &config, &pool, &data, boundary)?;
     let topology_seconds = phase.elapsed().as_secs_f64();
     let phase = Instant::now();
     log("Pass 2/2: splitting ways and spooling directed edges (Rust)");
@@ -650,6 +623,7 @@ pub fn run(config: Config) -> Result<String> {
             spools.close()
         });
         let coded = pipeline(
+            &pbf,
             &config,
             &pool,
             &way_blocks,

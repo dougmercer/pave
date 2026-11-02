@@ -1,11 +1,13 @@
 //! All preprocessing work runs in Rust, with the GIL released for the entire build.
 mod engine;
 mod index;
+mod pbf;
 mod storage;
 mod tags;
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[pyfunction]
@@ -37,19 +39,23 @@ fn build(
     })
 }
 
+fn borrowed(tags: &HashMap<String, String>) -> Vec<(&str, &str)> {
+    tags.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect()
+}
+
 #[pyfunction(name = "width_m")]
-fn width(tags: tags::Tags) -> f64 {
-    tags::width(&tags)
+fn width(tags: HashMap<String, String>) -> f64 {
+    tags::width(&borrowed(&tags))
 }
 
 #[pyfunction]
-fn direction(tags: tags::Tags) -> i8 {
-    tags::direction(&tags)
+fn direction(tags: HashMap<String, String>) -> i8 {
+    tags::direction(&borrowed(&tags))
 }
 
 #[pyfunction]
-fn flags(tags: tags::Tags) -> u8 {
-    tags::flags(&tags)
+fn flags(tags: HashMap<String, String>) -> u8 {
+    tags::flags(&borrowed(&tags))
 }
 
 #[pyfunction]

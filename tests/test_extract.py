@@ -5,6 +5,7 @@ import random
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 import numpy as np
 import osmium
@@ -245,6 +246,43 @@ def test_invalid_coordinates_are_fatal(pbf, tmp_path):
     path = pbf({1: (0, 0), 2: osmium_location}, [(1, [1, 2], {"highway": "road"})])
     with pytest.raises(ValueError, match="invalid WGS84 coordinates at node 2"):
         preprocess(path, tmp_path / "roads")
+
+
+@pytest.mark.parametrize(
+    "options", [",pbf_dense_nodes=false", ",pbf_compression=none", ",add_metadata=false"]
+)
+def test_other_pbf_encodings_give_the_same_dataset(pbf, tmp_path, options):
+    nodes = {1: (0.01, 0.02), 2: (0.03, 0.04), 3: (0.05, 0.06)}
+    ways = [(1, [1, 2, 3], {"highway": "road", "name": "Rua é"})]
+    node_tags = {2: {"barrier": "gate", "maxheight": "3"}}
+    plain = tmp_path / "plain"
+    preprocess(pbf(nodes, ways, node_tags=node_tags), plain)
+    other = tmp_path / "other"
+    preprocess(pbf(nodes, ways, node_tags=node_tags, options=options), other)
+    plain_files, other_files = dataset_files(plain), dataset_files(other)
+    del plain_files[Path("manifest.json")], other_files[Path("manifest.json")]  # Names the source.
+    assert plain_files == other_files
+    assert read_bbox(other, -180, -90, 180, 90)["dictionaries"]["name"][0] == "Rua é"
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        lambda data: data[:-10],
+        lambda data: data[:3],
+        lambda data: data[:40] + b"\xff" * 40 + data[80:],
+        lambda data: data[:-40] + b"\xff" * 20 + data[-20:],
+        lambda data: b"\xff" * len(data),
+    ],
+)
+def test_damaged_files_fail_cleanly(pbf, tmp_path, damage):
+    nodes = {i: (i * 0.001, 0) for i in range(1, 200)}
+    path = pbf(nodes, [(1, list(nodes), {"highway": "road", "name": "A road"})])
+    path.write_bytes(damage(path.read_bytes()))
+    out = tmp_path / "roads"
+    with pytest.raises(ValueError):
+        preprocess(path, out)
+    assert not out.exists()
 
 
 def test_empty_graph_missing_timestamp_and_ignored_relations(pbf, tmp_path):

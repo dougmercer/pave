@@ -7,14 +7,17 @@ def pbf(tmp_path):
     """Generate real binary PBF fixtures with independently specified OSM objects."""
     counter = 0
 
-    def write(nodes, ways, *, timestamp="2026-01-02T03:04:05Z", relations=(), node_tags=None):
+    def write(
+        nodes, ways, *, timestamp="2026-01-02T03:04:05Z", relations=(), node_tags=None, options=""
+    ):
         nonlocal counter
         counter += 1
         path = tmp_path / f"extract-{counter}.osm.pbf"
         header = osmium.io.Header()
         if timestamp:
             header.set("osmosis_replication_timestamp", timestamp)
-        with osmium.SimpleWriter(str(path), header=header) as writer:
+        target = osmium.io.File(str(path), f"pbf{options}") if options else str(path)
+        with osmium.SimpleWriter(target, header=header) as writer:
             for node_id, lonlat in sorted(nodes.items()):
                 tags = (node_tags or {}).get(node_id, {})
                 writer.add_node(osmium.osm.mutable.Node(id=node_id, location=lonlat, tags=tags))
