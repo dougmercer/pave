@@ -246,11 +246,11 @@ records CLI wall time including Python imports. Download and compilation time
 are excluded. OS file caches are not flushed; writes are flushed to the OS,
 not forced to physical media with `fsync`.
 
-Measure read latency on a preprocessed dataset, using the same query boxes for
-every configuration:
+Measure read latency on a preprocessed dataset. Queries are placed on its busiest
+tiles; to compare datasets on identical boxes, place them with `--boxes-from`:
 
 ```sh
-uv run python benchmarks/read.py outdir/
+uv run python benchmarks/read.py outdir/ --boxes-from other-dataset/
 ```
 
 Measured results are in [benchmarks/RESULTS.md](benchmarks/RESULTS.md), with raw
