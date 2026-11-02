@@ -43,6 +43,7 @@ class _Dataset:
     manifest: dict
     tiles: list[dict]
     bounds: np.ndarray
+    columns: dict[str, np.ndarray]
     dictionaries: dict[str, StringDictionary]
     highway_enum: dict[int, str]
 
@@ -51,7 +52,7 @@ def _load(path: Path) -> np.ndarray:
     return np.load(path, mmap_mode="r", allow_pickle=False)
 
 
-@lru_cache(maxsize=8)
+@lru_cache(maxsize=4)
 def _open_published(root: Path, _stamp: tuple[int, int]) -> _Dataset:
     with (root / "manifest.json").open(encoding="utf-8") as file:
         manifest = json.load(file)
@@ -63,6 +64,7 @@ def _open_published(root: Path, _stamp: tuple[int, int]) -> _Dataset:
         manifest,
         tiles,
         np.array([tile["bbox"] for tile in tiles], dtype=float).reshape(-1, 4),
+        {name: _load(root / "columns" / f"{name}.npy") for name in ALL_COLUMNS},
         {
             name: StringDictionary(_load(root / table["data"]), _load(root / table["offsets"]))
             for name, table in manifest["string_dictionaries"].items()
@@ -108,14 +110,42 @@ def _names(columns: Iterable[str] | None) -> tuple[str, ...]:
     return tuple(name for name in ALL_COLUMNS if name in names)
 
 
-def _tile(root: Path, tile: dict, names: tuple[str, ...]) -> dict[str, np.ndarray]:
-    directory = root / tile["path"]
-    return {name: _load(directory / f"{name}.npy") for name in names}
-
-
-def _iter_tiles(root, tiles, names) -> Iterator[dict[str, np.ndarray]]:
+def _runs(tiles: list[dict]) -> list[tuple[int, int, int, int]]:
+    """Merge selected tiles into contiguous (edge, edge stop, vertex, vertex stop) ranges."""
+    runs = []
     for tile in tiles:
-        yield _tile(root, tile, names)
+        edge, vertex = tile["edge_start"], tile["vertex_start"]
+        edge_stop, vertex_stop = edge + tile["edges"], vertex + tile["vertices"]
+        if runs and runs[-1][1] == edge:
+            runs[-1] = (runs[-1][0], edge_stop, runs[-1][2], vertex_stop)
+        else:
+            runs.append((edge, edge_stop, vertex, vertex_stop))
+    return runs
+
+
+def _read(dataset: _Dataset, runs: list[tuple[int, int, int, int]], name: str) -> np.ndarray:
+    column = dataset.columns[name]
+    if name == "offsets":
+        parts, base = [np.zeros(1, column.dtype)], 0
+        for edge, edge_stop, vertex, vertex_stop in runs:
+            parts.append(column[edge + 1 : edge_stop + 1] - vertex + base)
+            base += vertex_stop - vertex
+        offsets = np.concatenate(parts)
+        offsets.flags.writeable = False
+        return offsets
+    parts = [
+        column[vertex:vertex_stop] if name == "vertices" else column[edge:edge_stop]
+        for edge, edge_stop, vertex, vertex_stop in runs
+    ]
+    if len(parts) == 1:
+        return parts[0]  # Still a read-only view of the mapped file.
+    return np.concatenate(parts) if parts else column[:0]
+
+
+def _iter_tiles(dataset, tiles, names) -> Iterator[dict[str, np.ndarray]]:
+    for tile in tiles:
+        runs = _runs([tile])
+        yield {name: _read(dataset, runs, name) for name in names}
 
 
 def iter_bbox_tiles(
@@ -130,12 +160,11 @@ def iter_bbox_tiles(
 
     Bboxes are inclusive. west > east crosses the antimeridian. Tile envelopes
     include all edge vertices; complete tiles are returned, without clipping.
-    `columns` limits which columns are opened, as in `read_bbox`. Each mapped
-    column holds a file descriptor until released, so process tiles one at a time.
+    `columns` limits which columns are yielded, as in `read_bbox`.
     """
     dataset = _open(outdir)
     tiles = _select(dataset, west, south, east, north)
-    return _iter_tiles(dataset.root, tiles, _names(columns))
+    return _iter_tiles(dataset, tiles, _names(columns))
 
 
 def read_bbox(
@@ -150,8 +179,8 @@ def read_bbox(
 
     String columns contain global int32 codes. Decode via result['dictionaries'][name][code].
     Highway codes and boolean bits are defined in result['highway_enum'] and ['flag_bits'].
-    A one-tile result keeps its read-only memmaps. A multi-tile result allocates
-    contiguous arrays exactly once and maps/copies one input column at a time.
+    Tiles adjacent on disk are returned as read-only memmaps, without copying;
+    separated tiles are concatenated into new arrays. `offsets` is always computed.
     `columns` names the columns to return, avoiding work on any others; requesting
     `vertices` also returns `offsets`. By default every column is returned.
     The dataset's metadata is cached between calls and refreshed if it is replaced.
@@ -159,28 +188,8 @@ def read_bbox(
     dataset = _open(outdir)
     tiles = _select(dataset, west, south, east, north)
     names = _names(columns)
-    if len(tiles) == 1:
-        result = _tile(dataset.root, tiles[0], names)
-    else:
-        edge_count = sum(tile["edges"] for tile in tiles)
-        vertex_count = sum(tile["vertices"] for tile in tiles)
-        shapes = {"vertices": (vertex_count, 2), "offsets": edge_count + 1}
-        result = {name: np.empty(shapes.get(name, edge_count), DTYPES[name]) for name in names}
-        if "offsets" in result:
-            result["offsets"][0] = 0
-        edge_start = vertex_start = 0
-        for tile in tiles:
-            directory = dataset.root / tile["path"]
-            edge_stop, vertex_stop = edge_start + tile["edges"], vertex_start + tile["vertices"]
-            for name in names:
-                source = _load(directory / f"{name}.npy")
-                if name == "vertices":
-                    result[name][vertex_start:vertex_stop] = source
-                elif name == "offsets":
-                    result[name][edge_start + 1 : edge_stop + 1] = source[1:] + vertex_start
-                else:
-                    result[name][edge_start:edge_stop] = source
-            edge_start, vertex_start = edge_stop, vertex_stop
+    runs = _runs(tiles)
+    result = {name: _read(dataset, runs, name) for name in names}
     result.update(
         {
             "dictionaries": dict(dataset.dictionaries),

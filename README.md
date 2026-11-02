@@ -71,18 +71,19 @@ contains global integer codes, so concatenation never needs to remap codes or
 create Python objects for each edge. Dictionaries expose memory-mapped UTF-8
 bytes and offsets; decoding a specific code is optional.
 
-Only selected tile files are opened. A single-tile result consists of read-only
-memory maps. Multiple tiles require one allocation per concatenated column;
-offsets are rebased to the concatenated vertices. For bounded-memory or zero-copy
-consumption, use `iter_bbox_tiles(outdir, west, south, east, north)`, which yields
-each tile's read-only column memory maps separately. Direct access also works:
+Each column is one memory-mapped file for the whole dataset, opened once per
+process, so a read touches only the pages of the tiles it selects. Tiles adjacent
+on disk are returned as read-only memory maps without copying; separated tiles
+are concatenated into new arrays. `offsets` is always computed, and rebased to the
+returned vertices. For bounded-memory or zero-copy consumption, use
+`iter_bbox_tiles(outdir, west, south, east, north)`, which yields each tile's
+columns separately. Direct access also works, using the ranges in `manifest.json`:
 
 ```python
 import numpy as np
-u = np.load("outdir/tiles/744_558/u.npy", mmap_mode="r", allow_pickle=False)
+u = np.load("outdir/columns/u.npy", mmap_mode="r", allow_pickle=False)
+tile_u = u[tile["edge_start"] : tile["edge_start"] + tile["edges"]]
 ```
-
-The example tile ID is illustrative; actual paths are in `manifest.json`.
 
 Both readers accept `columns` to skip mapping and copying what you do not use,
 which is usually the cheapest way to speed up a read. Requesting `vertices` also
@@ -92,26 +93,30 @@ returns `offsets`:
 roads = read_bbox("outdir", 6.0, 49.5, 6.3, 49.8, columns=("u", "v", "vertices", "width_m"))
 ```
 
-The manifest, tile envelopes, and dictionaries stay open between calls for up to
-eight datasets, and are refreshed when a dataset is replaced. Mapped tile columns
-are opened per call, and each holds a file descriptor until released, so process
-`iter_bbox_tiles` results one at a time instead of keeping them all.
+Columns, tile envelopes, and dictionaries stay open between calls for up to four
+datasets, and are refreshed when a dataset is replaced. Each open dataset holds 26
+file descriptors, however many tiles it has or you keep.
+
+Extra tiles cost almost nothing to read, and smaller tiles return fewer unwanted
+edges, so `--tile-degrees 0.05` suits country-sized extracts. Avoid it at planet
+scale, where the JSON tile list in `manifest.json` would become very large.
 
 Empty results have `vertices.shape == (0, 2)`, `offsets == [0]`, and empty edge
 columns with the normal dtypes. Bounding boxes use inclusive intersection;
 `west > east` represents an antimeridian-crossing query. Results contain **whole
 intersecting tiles**, without clipping or exact per-edge filtering.
 
-## Version 1 storage contract
+## Version 2 storage contract
 
 All arrays are little-endian, C-contiguous, uncompressed `.npy` files. No object
 arrays and no pickle are used. An edge's `lonlat` is the slice of `vertices`
-between consecutive offsets, always ordered from `u` to `v`.
+between consecutive offsets, always ordered from `u` to `v`. Tiles are contiguous
+ranges of each column, ordered by grid `x` and then `y`.
 
-| File within each tile | Dtype and shape | Meaning |
+| File within `columns/` | Dtype and shape | Meaning |
 | --- | --- | --- |
 | `vertices.npy` | float64 `(V, 2)` | WGS84 `[lon, lat]`, all original shape vertices |
-| `offsets.npy` | int64 `(E + 1,)` | Starts at 0, ends at V; each edge has at least two vertices |
+| `offsets.npy` | int64 `(E + 1,)` | Global across tiles; starts at 0, ends at V; each edge has at least two vertices |
 | `u.npy`, `v.npy` | int64 `(E,)` | Global OSM junction node IDs |
 | `osmid.npy` | int64 `(E,)` | Original OSM way ID |
 | `width_m.npy` | float64 `(E,)` | Positive full carriageway width, same in both directions |
@@ -148,8 +153,8 @@ Each directed edge is stored exactly once, in the cell containing its **first
 vertex**. A reverse edge can therefore be stored in a different tile.
 Junction IDs are never made local to a tile.
 
-The manifest lists each tile's ID, path, edge/vertex counts, `grid_bbox`, and
-`bbox`, all using `[west, south, east, north]`. **`bbox` encloses every vertex
+The manifest lists each tile's ID, `edge_start`, `vertex_start`, edge/vertex
+counts, `grid_bbox`, and `bbox`, all using `[west, south, east, north]`. **`bbox` encloses every vertex
 stored in the tile**, including edges reaching outside its grid cell. The reader
 uses this envelope so crossing roads are discoverable from their destination or
 interior. Envelopes can overlap, but edges are not duplicated. Dateline-crossing

@@ -1,7 +1,7 @@
-"""The version 1 wire format. All on-disk columns are explicitly little endian."""
+"""The version 2 wire format. All on-disk columns are explicitly little endian."""
 
 FORMAT = "osm-road-prep"
-VERSION = 1
+VERSION = 2
 HIGHWAYS = (
     "motorway",
     "trunk",

@@ -1,5 +1,5 @@
 {
-  "recorded_at": "2026-11-02T17:09:26.003940+00:00",
+  "recorded_at": "2026-11-02T17:19:43.090849+00:00",
   "source_url": "https://download.geofabrik.de/europe/belgium-latest.osm.pbf",
   "input_sha256": "4a139068b5131d018a11f85a4fae498d01eadb8ecf199c795970891bee4f8372",
   "input_bytes": 698354581,
@@ -11,10 +11,10 @@
   "rustc": "rustc 1.93.0 (254b59607 2026-01-19) (Homebrew)",
   "build": "Maturin release, thin LTO, codegen-units=1",
   "method": "Fresh subprocess per run with default CLI settings, recorded per run; local temporary disk; OS file cache not flushed. Preprocessing time includes indexes, graph, columns and scratch cleanup; CLI wall also includes Python startup/imports. Downloads/builds excluded. Writes are flushed to the OS, not fsynced to physical media.",
-  "median_edges_per_second": 564630.0968161786,
-  "median_elapsed_seconds": 5.212384207989089,
-  "median_cli_edges_per_second": 556516.8835185658,
-  "peak_rss_bytes": 627261440,
+  "median_edges_per_second": 552442.3299637963,
+  "median_elapsed_seconds": 5.327377791982144,
+  "median_cli_edges_per_second": 544547.5216278546,
+  "peak_rss_bytes": 632274944,
   "runs": [
     {
       "buffers": {
@@ -39,17 +39,17 @@
         "timestamp_source": "pbf_header"
       },
       "stages": {
-        "columns_seconds": 0.410420042,
-        "edges_seconds": 2.000195083,
-        "topology_seconds": 2.691741208
+        "columns_seconds": 0.351768375,
+        "edges_seconds": 2.213953959,
+        "topology_seconds": 3.0274525
       },
       "tiles": 94,
       "vertices": 14763799,
-      "elapsed_seconds": 5.105569249950349,
-      "edges_per_second": 576442.8716795136,
-      "peak_rss_bytes": 623591424,
-      "cli_wall_seconds": 5.180949833011255,
-      "cli_edges_per_second": 568055.8767907311
+      "elapsed_seconds": 5.602082832949236,
+      "edges_per_second": 525352.6389667129,
+      "peak_rss_bytes": 617758720,
+      "cli_wall_seconds": 5.679561750032008,
+      "cli_edges_per_second": 518185.93221271236
     },
     {
       "buffers": {
@@ -74,17 +74,17 @@
         "timestamp_source": "pbf_header"
       },
       "stages": {
-        "columns_seconds": 0.414624459,
-        "edges_seconds": 2.023119917,
-        "topology_seconds": 2.7718408329999997
+        "columns_seconds": 0.30683525,
+        "edges_seconds": 2.15663025,
+        "topology_seconds": 2.8547305830000003
       },
       "tiles": 94,
       "vertices": 14763799,
-      "elapsed_seconds": 5.212384207989089,
-      "edges_per_second": 564630.0968161786,
-      "peak_rss_bytes": 627261440,
-      "cli_wall_seconds": 5.288373250048608,
-      "cli_edges_per_second": 556516.8835185658
+      "elapsed_seconds": 5.327377791982144,
+      "edges_per_second": 552442.3299637963,
+      "peak_rss_bytes": 614055936,
+      "cli_wall_seconds": 5.404613707913086,
+      "cli_edges_per_second": 544547.5216278546
     },
     {
       "buffers": {
@@ -109,17 +109,17 @@
         "timestamp_source": "pbf_header"
       },
       "stages": {
-        "columns_seconds": 0.438488542,
-        "edges_seconds": 2.061186375,
-        "topology_seconds": 2.7651983749999998
+        "columns_seconds": 0.294999875,
+        "edges_seconds": 2.090307917,
+        "topology_seconds": 2.828355125
       },
       "tiles": 94,
       "vertices": 14763799,
-      "elapsed_seconds": 5.267988667008467,
-      "edges_per_second": 558670.336257819,
-      "peak_rss_bytes": 604602368,
-      "cli_wall_seconds": 5.346193709061481,
-      "cli_edges_per_second": 550498.0103903966
+      "elapsed_seconds": 5.222276375046931,
+      "edges_per_second": 563560.5603071039,
+      "peak_rss_bytes": 632274944,
+      "cli_wall_seconds": 5.306560041033663,
+      "cli_edges_per_second": 554609.5732908584
     }
   ]
 }

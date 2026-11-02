@@ -101,7 +101,8 @@ def test_junctions_shapes_tags_and_cross_tile_ids(pbf, tmp_path):
     selected = read_bbox(out, 0.595, 0.135, 0.605, 0.145)
     assert {(3, 5), (5, 3)} <= {(u, v) for u, v, _ in edge_rows(selected, 100)}
     for tile in iter_bbox_tiles(out, -180, -90, 180, 90):
-        assert all(isinstance(value, np.memmap) for value in tile.values())
+        mapped = (value for name, value in tile.items() if name != "offsets")
+        assert all(isinstance(value, np.memmap) for value in mapped)
         assert all(not value.flags.writeable for value in tile.values())
         assert (np.diff(tile["offsets"]) >= 2).all()
 

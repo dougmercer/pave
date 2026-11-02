@@ -8,11 +8,11 @@ timestamp `2026-11-01T21:21:36Z`.
 
 | Extract | Input | Edges | Vertices | Tiles | Median time | Median edges/s | Peak RSS |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| [Luxembourg](https://download.geofabrik.de/europe/luxembourg.html) | 45.6 MiB | 266,808 | 1,625,556 | 14 | **0.419 s** | **637,291** | **232.5 MiB** |
-| [Belgium](https://download.geofabrik.de/europe/belgium.html) | 666.0 MiB | 2,943,069 | 14,763,799 | 94 | **5.212 s** | **564,630** | **598.2 MiB** |
+| [Luxembourg](https://download.geofabrik.de/europe/luxembourg.html) | 45.6 MiB | 266,808 | 1,625,556 | 14 | **0.453 s** | **588,522** | **229.2 MiB** |
+| [Belgium](https://download.geofabrik.de/europe/belgium.html) | 666.0 MiB | 2,943,069 | 14,763,799 | 94 | **5.327 s** | **552,442** | **603.0 MiB** |
 
 Including Python startup and imports, median CLI throughput was
-541,518 edges/s on Luxembourg and 556,517 edges/s on Belgium.
+508,541 edges/s on Luxembourg and 544,548 edges/s on Belgium.
 
 ## Individual runs
 
@@ -27,36 +27,42 @@ Luxembourg:
 
 | Run | Preprocess seconds | Edges/s | CLI edges/s | Peak RSS MiB |
 | --- | ---: | ---: | ---: | ---: |
-| 1 | 0.407 | 655,453 | 559,082 | 232.5 |
-| 2 | 0.419 | 637,291 | 541,518 | 227.4 |
-| 3 | 0.420 | 635,227 | 539,258 | 224.3 |
+| 1 | 0.491 | 543,300 | 474,912 | 229.2 |
+| 2 | 0.453 | 588,522 | 508,541 | 227.1 |
+| 3 | 0.421 | 633,413 | 542,071 | 221.8 |
 
 Belgium:
 
 | Run | Preprocess seconds | Edges/s | CLI edges/s | Peak RSS MiB |
 | --- | ---: | ---: | ---: | ---: |
-| 1 | 5.106 | 576,443 | 568,056 | 594.7 |
-| 2 | 5.212 | 564,630 | 556,517 | 598.2 |
-| 3 | 5.268 | 558,670 | 550,498 | 576.6 |
+| 1 | 5.602 | 525,353 | 518,186 | 589.1 |
+| 2 | 5.327 | 552,442 | 544,548 | 585.6 |
+| 3 | 5.222 | 563,561 | 554,610 | 603.0 |
 
 ## Read latency
 
-Median `read_bbox` latency on the Belgian dataset at 0.25° tiles, with a warm page
-cache and identical query boxes centred on the 12 busiest tiles. Routing columns
-are `u`, `v`, `vertices`, `offsets`, `width_m`, and `highway`. Results contain
-whole intersecting tiles, so edge counts reflect tile size and not the query box.
+Median `read_bbox` latency on the Belgian dataset with a warm page cache, over 60
+identical query boxes centred on the 12 busiest 0.25° tiles. Each figure includes
+touching every returned byte of the routing columns (`u`, `v`, `vertices`,
+`offsets`, `width_m`, and `highway`), because memory maps return before their pages
+load. Results contain whole intersecting tiles, so edge counts reflect tile size
+and not the query box. Version 1 stored 16 files per tile; version 2 stores one
+file per column.
 
-| Query | Tiles | Edges | All columns | Routing columns |
-| --- | ---: | ---: | ---: | ---: |
-| point 200 m | 1 | 71,671 | 2.00 ms | 0.69 ms |
-| city 5 km | 2 | 97,242 | 5.23 ms | 2.09 ms |
-| region 25 km | 4 | 224,844 | 12.15 ms | 5.56 ms |
-| metro 100 km | 21 | 927,868 | 69.35 ms | 27.12 ms |
+| Query | Edges at 0.25° | Version 1, quiet disk | Version 1, during backup | Version 2, 0.25° | Edges at 0.05° | Version 2, 0.05° |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| point 200 m | 79,452 | 1.73 ms | 36.00 ms | 0.33 ms | 4,138 | 0.07 ms |
+| city 5 km | 104,623 | 3.38 ms | 52.63 ms | 0.50 ms | 12,048 | 0.12 ms |
+| region 25 km | 226,027 | 6.68 ms | 138.00 ms | 1.44 ms | 103,426 | 0.71 ms |
+| metro 100 km | 927,868 | 37.39 ms | 753.87 ms | 5.48 ms | 688,730 | 4.40 ms |
 
-Latency is dominated by opening one file per column per tile, so it rises with the
-number of tiles selected. Requesting fewer columns is the most effective change a
-caller can make. These figures were measured on macOS, where creating a memory map
-is also much slower while other disk writes are in flight.
+The backup column was measured during a Time Machine backup. On macOS, creating a
+memory map slows sharply while other disk writes are in flight: it went from 23 µs
+to about 3 ms, tracking the cost of `F_FULLFSYNC`. Version 1 creates maps on every
+read, so it is exposed to this. Version 2 creates them once, and its figures were
+the same with and without the backup. Linux was not measured.
+
+Opening a dataset costs about 35 ms once per process.
 
 ## Sources
 

@@ -138,7 +138,8 @@ impl<'a> Dictionaries<'a> {
 #[derive(Serialize)]
 struct TileMeta {
     id: String,
-    path: String,
+    edge_start: u64,
+    vertex_start: u64,
     edges: u64,
     vertices: u64,
     bbox: [f64; 4],
@@ -224,8 +225,9 @@ impl Spools {
             let id = format!("{x}_{y}");
             Tile {
                 meta: TileMeta {
-                    path: format!("tiles/{id}"),
                     id,
+                    edge_start: 0,
+                    vertex_start: 0,
                     edges: 0,
                     vertices: 0,
                     bbox: [180.0, 90.0, -180.0, -90.0],
@@ -287,37 +289,58 @@ impl Spools {
 
     pub fn finish(&mut self, out: &Path, metadata: &Value) -> Result<u64> {
         self.close()?;
+        let dir = out.join("columns");
+        fs::create_dir(&dir)?;
+        let column =
+            |name: &str, dtype, shape: &[u64]| npy(&dir.join(format!("{name}.npy")), dtype, shape);
+        let mut columns = COLUMNS
+            .iter()
+            .map(|(name, dtype, _, _)| column(name, dtype, &[self.edges]))
+            .collect::<Result<Vec<_>>>()?;
+        let mut offsets = column("offsets", "<i8", &[self.edges + 1])?;
+        let mut vertices = column("vertices", "<f8", &[self.vertices, 2])?;
+        offsets.write_all(&0i64.to_le_bytes())?;
         let mut manifest = writer(&out.join("manifest.json"))?;
         let header = serde_json::to_string_pretty(metadata)?;
         manifest.write_all(header.trim_end_matches('}').trim_end().as_bytes())?;
         manifest.write_all(b",\n  \"tiles\": [\n")?;
+        let (mut edge_start, mut vertex_start) = (0, 0);
         let mut count = 0u64;
         let mut keys: Vec<_> = self.tiles.keys().copied().collect();
         keys.sort_unstable();
         for key in keys {
+            let tile = self.tiles.get_mut(&key).unwrap();
+            tile.meta.edge_start = edge_start;
+            tile.meta.vertex_start = vertex_start;
+            edge_start += tile.meta.edges;
+            vertex_start += tile.meta.vertices;
             let meta = &self.tiles[&key].meta;
-            self.finish_tile(out, meta)?;
+            self.finish_tile(meta, &mut columns, &mut offsets, &mut vertices)?;
             if count > 0 {
                 manifest.write_all(b",\n")?;
             }
             serde_json::to_writer(&mut manifest, meta)?;
             count += 1;
         }
+        for column in &mut columns {
+            column.flush()?;
+        }
+        offsets.flush()?;
+        vertices.flush()?;
         manifest.write_all(b"\n  ]\n}\n")?;
         manifest.flush()?;
         Ok(count)
     }
 
-    fn finish_tile(&self, out: &Path, meta: &TileMeta) -> Result<()> {
-        let dest = out.join(&meta.path);
-        fs::create_dir_all(&dest)?;
-        let mut columns = COLUMNS
-            .iter()
-            .map(|(name, dtype, _, _)| npy(&dest.join(format!("{name}.npy")), dtype, &[meta.edges]))
-            .collect::<Result<Vec<_>>>()?;
-        let mut offsets = npy(&dest.join("offsets.npy"), "<i8", &[meta.edges + 1])?;
-        let mut position = 0i64;
-        offsets.write_all(&position.to_le_bytes())?;
+    /// Append one tile to the shared columns; offsets stay global across tiles.
+    fn finish_tile(
+        &self,
+        meta: &TileMeta,
+        columns: &mut [BufWriter<File>],
+        offsets: &mut BufWriter<File>,
+        vertices: &mut BufWriter<File>,
+    ) -> Result<()> {
+        let mut position = meta.vertex_start as i64;
         let rows_path = self.scratch.join(format!("{}.rows", meta.id));
         let coords_path = self.scratch.join(format!("{}.coords", meta.id));
         let mut rows = BufReader::new(File::open(&rows_path)?);
@@ -339,18 +362,12 @@ impl Spools {
             remaining -= n as u64;
         }
         ensure!(
-            position as u64 == meta.vertices,
+            position as u64 == meta.vertex_start + meta.vertices,
             "Vertex spool count mismatch"
         );
-        for column in &mut columns {
-            column.flush()?;
-        }
-        offsets.flush()?;
-        let mut coords = npy(&dest.join("vertices.npy"), "<f8", &[meta.vertices, 2])?;
         let mut source = File::open(&coords_path)?;
-        let bytes = std::io::copy(&mut source, &mut coords)?;
+        let bytes = std::io::copy(&mut source, vertices)?;
         ensure!(bytes == meta.vertices * 16, "Truncated vertex spool");
-        coords.flush()?;
         drop(rows);
         drop(source);
         fs::remove_file(rows_path)?;
