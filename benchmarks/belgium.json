@@ -1,0 +1,125 @@
+{
+  "recorded_at": "2026-11-02T17:09:26.003940+00:00",
+  "source_url": "https://download.geofabrik.de/europe/belgium-latest.osm.pbf",
+  "input_sha256": "4a139068b5131d018a11f85a4fae498d01eadb8ecf199c795970891bee4f8372",
+  "input_bytes": 698354581,
+  "platform": "macOS-26.2-arm64-arm-64bit-Mach-O",
+  "processor": "Apple M1 Max",
+  "python": "3.15.0 (main, Oct  9 2026, 15:11:47) [Clang 22.1.3 ]",
+  "numpy": "2.5.4",
+  "package": "0.1.0",
+  "rustc": "rustc 1.93.0 (254b59607 2026-01-19) (Homebrew)",
+  "build": "Maturin release, thin LTO, codegen-units=1",
+  "method": "Fresh subprocess per run with default CLI settings, recorded per run; local temporary disk; OS file cache not flushed. Preprocessing time includes indexes, graph, columns and scratch cleanup; CLI wall also includes Python startup/imports. Downloads/builds excluded. Writes are flushed to the OS, not fsynced to physical media.",
+  "median_edges_per_second": 564630.0968161786,
+  "median_elapsed_seconds": 5.212384207989089,
+  "median_cli_edges_per_second": 556516.8835185658,
+  "peak_rss_bytes": 627261440,
+  "runs": [
+    {
+      "buffers": {
+        "sort_runs": 1,
+        "spool_flushes": 378
+      },
+      "drivable_ways": 1024767,
+      "edges": 2943069,
+      "implementation": "rust",
+      "settings": {
+        "cache_mb": 32,
+        "sort_mb": 64,
+        "spool_mb": 64,
+        "threads": 8,
+        "tile_degrees": 0.25
+      },
+      "source": {
+        "file": "belgium.osm.pbf",
+        "generator": "osmium/1.16.0",
+        "size_bytes": 698354581,
+        "timestamp": "2026-11-01T21:21:36Z",
+        "timestamp_source": "pbf_header"
+      },
+      "stages": {
+        "columns_seconds": 0.410420042,
+        "edges_seconds": 2.000195083,
+        "topology_seconds": 2.691741208
+      },
+      "tiles": 94,
+      "vertices": 14763799,
+      "elapsed_seconds": 5.105569249950349,
+      "edges_per_second": 576442.8716795136,
+      "peak_rss_bytes": 623591424,
+      "cli_wall_seconds": 5.180949833011255,
+      "cli_edges_per_second": 568055.8767907311
+    },
+    {
+      "buffers": {
+        "sort_runs": 1,
+        "spool_flushes": 378
+      },
+      "drivable_ways": 1024767,
+      "edges": 2943069,
+      "implementation": "rust",
+      "settings": {
+        "cache_mb": 32,
+        "sort_mb": 64,
+        "spool_mb": 64,
+        "threads": 8,
+        "tile_degrees": 0.25
+      },
+      "source": {
+        "file": "belgium.osm.pbf",
+        "generator": "osmium/1.16.0",
+        "size_bytes": 698354581,
+        "timestamp": "2026-11-01T21:21:36Z",
+        "timestamp_source": "pbf_header"
+      },
+      "stages": {
+        "columns_seconds": 0.414624459,
+        "edges_seconds": 2.023119917,
+        "topology_seconds": 2.7718408329999997
+      },
+      "tiles": 94,
+      "vertices": 14763799,
+      "elapsed_seconds": 5.212384207989089,
+      "edges_per_second": 564630.0968161786,
+      "peak_rss_bytes": 627261440,
+      "cli_wall_seconds": 5.288373250048608,
+      "cli_edges_per_second": 556516.8835185658
+    },
+    {
+      "buffers": {
+        "sort_runs": 1,
+        "spool_flushes": 378
+      },
+      "drivable_ways": 1024767,
+      "edges": 2943069,
+      "implementation": "rust",
+      "settings": {
+        "cache_mb": 32,
+        "sort_mb": 64,
+        "spool_mb": 64,
+        "threads": 8,
+        "tile_degrees": 0.25
+      },
+      "source": {
+        "file": "belgium.osm.pbf",
+        "generator": "osmium/1.16.0",
+        "size_bytes": 698354581,
+        "timestamp": "2026-11-01T21:21:36Z",
+        "timestamp_source": "pbf_header"
+      },
+      "stages": {
+        "columns_seconds": 0.438488542,
+        "edges_seconds": 2.061186375,
+        "topology_seconds": 2.7651983749999998
+      },
+      "tiles": 94,
+      "vertices": 14763799,
+      "elapsed_seconds": 5.267988667008467,
+      "edges_per_second": 558670.336257819,
+      "peak_rss_bytes": 604602368,
+      "cli_wall_seconds": 5.346193709061481,
+      "cli_edges_per_second": 550498.0103903966
+    }
+  ]
+}

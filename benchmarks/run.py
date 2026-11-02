@@ -69,8 +69,8 @@ def main():
         "package": importlib.metadata.version("osm-road-prep"),
         "rustc": subprocess.check_output(["rustc", "--version"], text=True).strip(),
         "build": "Maturin release, thin LTO, codegen-units=1",
-        "method": "Fresh subprocess per run; default 0.25-degree tiles, 32 MiB SQLite cache, "
-        "2 decode threads; local temporary disk; OS file cache not flushed. "
+        "method": "Fresh subprocess per run with default CLI settings, recorded per run; "
+        "local temporary disk; OS file cache not flushed. "
         "Preprocessing time includes indexes, graph, columns and scratch cleanup; "
         "CLI wall also includes Python startup/imports. Downloads/builds excluded. "
         "Writes are flushed to the OS, not fsynced to physical media.",

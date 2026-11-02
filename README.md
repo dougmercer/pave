@@ -29,16 +29,22 @@ Options:
 
 ```sh
 prep input.osm.pbf outdir/ --tile-degrees 0.25 --workdir /fast-disk/scratch \
-    --cache-mb 32 --threads 2
+    --threads 8 --cache-mb 32 --sort-mb 64 --spool-mb 64
 ```
 
-`--threads` controls the number of parallel PBF decoders and bounds the number
-of decoded blocks in flight. `--cache-mb` controls the SQLite page cache.
-`--quiet` suppresses stderr progress. Stdout is a JSON performance report, also
-saved as `outdir/stats.json`.
+`--threads` sets the workers that decode and transform PBF blocks, and bounds the
+blocks in flight; one more thread reads the file and the calling thread writes
+output. `--cache-mb` sizes the SQLite cache for string dictionaries. `--sort-mb`
+limits each in-memory run when sorting node references, and `--spool-mb` limits
+tile output buffered in RAM. Exceeding either spills to scratch and never changes
+the output. The report's `buffers` section shows `sort_runs` and `spool_flushes`,
+which reveal whether a larger setting would help. `--quiet` suppresses stderr
+progress. Stdout is a JSON performance report, also saved as `outdir/stats.json`.
 
 Input must be a snapshot with **unique, ascending node IDs and way IDs**, as in
-normal Geofabrik extracts. History files are rejected. Incomplete references on
+normal Geofabrik extracts. Files advertising `Sort.Type_then_ID` skip node blocks
+when scanning ways, and are rejected if they are not actually sorted; other files
+work but scan every block twice. History files are rejected. Incomplete references on
 drivable ways cause a descriptive failure: no partial graph is published.
 Missing references on excluded ways are irrelevant. Output must be absent or
 empty; existing datasets are never overwritten. Scratch files are removed on
@@ -76,6 +82,20 @@ u = np.load("outdir/tiles/744_558/u.npy", mmap_mode="r", allow_pickle=False)
 ```
 
 The example tile ID is illustrative; actual paths are in `manifest.json`.
+
+Both readers accept `columns` to skip mapping and copying what you do not use,
+which is usually the cheapest way to speed up a read. Requesting `vertices` also
+returns `offsets`:
+
+```python
+roads = read_bbox("outdir", 6.0, 49.5, 6.3, 49.8, columns=("u", "v", "vertices", "width_m"))
+```
+
+The manifest, tile envelopes, and dictionaries stay open between calls for up to
+eight datasets, and are refreshed when a dataset is replaced. Mapped tile columns
+are opened per call, and each holds a file descriptor until released, so process
+`iter_bbox_tiles` results one at a time instead of keeping them all.
+
 Empty results have `vertices.shape == (0, 2)`, `offsets == [0]`, and empty edge
 columns with the normal dtypes. Bounding boxes use inclusive intersection;
 `west > east` represents an antimeridian-crossing query. Results contain **whole
@@ -173,26 +193,30 @@ become NaN. The package never computes a speed or a vehicle permission.
 
 ## Memory and temporary disk
 
-The first pass writes a sorted sparse node-location file (24 bytes per input
-node) and counts drivable-way incidence in SQLite. It exports only junction IDs
-to another sorted disk file (8 bytes per junction). The second pass memory-maps
-these immutable indexes and reads only PBF blocks containing ways, whose file
-offsets were recorded in pass one. Sparse indexes scale with actual node count,
-not the maximum OSM ID.
+Preprocessing makes three passes. The first scans way blocks and externally sorts
+every node reference from a drivable way, producing a sorted list of the nodes
+those ways use, each marked as a junction or a shape point. The second scans node
+blocks and keeps only those nodes in a sorted location file, with the junction bit
+in the same record. Drivable ways reference about 8-16% of an extract's nodes, so
+this index stays far smaller than one covering every node. The third scans way
+blocks again, resolves locations through a memory map, and spools directed edges
+by tile. Decoding and per-block work happen on the worker threads, in order.
 
-The native process keeps bounded PBF batches, one way at a time, a 32 MiB SQLite
-cache, at most 32 tile spool pairs, an 8,192-entry string cache, and 32,768 rows
-per column-conversion chunk. Tile metadata and global dictionaries remain in
-SQLite; even the manifest tile list is streamed. No complete extract, topology
-hash map, or tile's complete geometry is accumulated in application RAM.
-Memory-mapped index pages are demand-paged by the OS, so observed RSS includes
-resident file-backed pages and is not a strict `--cache-mb` cap.
+The native process keeps bounded PBF batches, one sort run (`--sort-mb`), buffered
+tile output (`--spool-mb`), a SQLite cache (`--cache-mb`), an 8,192-entry string
+cache, and 32,768 rows per column-conversion chunk. Global dictionaries live in
+SQLite. Tile metadata stays in RAM, which scales with the tile count and not the
+extract size. No complete extract, topology hash map, or tile's complete geometry
+is accumulated in application RAM. Memory-mapped index pages are demand-paged by
+the OS, so observed RSS includes resident file-backed pages.
 
-Budget scratch disk for the location index, topology DB, junction IDs, edge
-spools, and output. Geometry spools use 16 bytes per directed vertex and row
-spools use 74 bytes per edge. Final edge columns use 74 bytes per edge plus
-16 bytes per directed vertex, dictionaries, and small `.npy` headers. Indexes
-and spools are temporary; tile spools are removed as columns are finalized.
+Budget scratch disk for the sorted runs (8 bytes per reference), used-node list
+(8 bytes per used node), location index (24 bytes per used node), dictionary
+database, edge spools, and output. Geometry spools use 16 bytes per directed vertex
+and row spools use 74 bytes per edge. Final edge columns use 74 bytes per edge plus
+16 bytes per directed vertex, dictionaries, and small `.npy` headers. Runs, the
+used-node list, and the location index are deleted as soon as each pass finishes,
+and tile spools as their columns are finalized.
 
 ## Tests and benchmarks
 
@@ -222,6 +246,13 @@ records CLI wall time including Python imports. Download and compilation time
 are excluded. OS file caches are not flushed; writes are flushed to the OS,
 not forced to physical media with `fsync`.
 
+Measure read latency on a preprocessed dataset, using the same query boxes for
+every configuration:
+
+```sh
+uv run python benchmarks/read.py outdir/
+```
+
 Measured results are in [benchmarks/RESULTS.md](benchmarks/RESULTS.md), with raw
-records in [benchmarks/luxembourg.json](benchmarks/luxembourg.json). These are
-regional-extract measurements, not a claim of planet-scale benchmark performance.
+records alongside. These are regional-extract measurements, not a claim of
+planet-scale benchmark performance.
