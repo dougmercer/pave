@@ -665,7 +665,7 @@ pub fn run(config: Config) -> Result<String> {
         "numeric_null": "NaN", "string_dictionaries": dictionary_tables,
         "attribution": "© OpenStreetMap contributors", "license": "https://www.openstreetmap.org/copyright",
     });
-    let tiles = spools.finish(&config.output, &metadata)?;
+    let tiles = spools.finish(&config.output, &metadata, &pool)?;
     Ok(serde_json::to_string(&json!({
         "edges": spools.edges, "vertices": spools.vertices, "tiles": tiles, "drivable_ways": ways,
         "stages": {"topology_seconds": topology_seconds, "edges_seconds": edges_seconds,

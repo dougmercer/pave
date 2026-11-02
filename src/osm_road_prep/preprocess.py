@@ -36,7 +36,7 @@ def preprocess(
     Scratch indexes/spools go beside `outdir` unless `workdir` names another disk. `cache_mb`,
     `sort_mb`, and `spool_mb` bound the SQLite dictionary cache, the sort run size,
     and buffered tile output; the report's `buffers` shows how often the latter two
-    spilled. `threads` sets the decode workers. Output must be absent or empty.
+    spilled. `threads` sets the decode and spool read workers. Output must be absent or empty.
     `progress` gets start/end messages; native stages go to stderr when progress is
     enabled. Peak RSS is the lifetime high-water mark of this process; benchmark in
     a fresh subprocess for a per-run measurement.

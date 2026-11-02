@@ -33,9 +33,9 @@ prep input.osm.pbf outdir/ --tile-degrees 0.1 --workdir /fast-disk/scratch \
 ```
 
 Scratch files go beside the output unless `--workdir` names another disk.
-`--threads` sets the workers that decode and transform PBF blocks, and bounds the
-blocks in flight; one more thread reads the file and the calling thread writes
-output. `--cache-mb` sizes the SQLite cache for string dictionaries. `--sort-mb`
+`--threads` sets the workers that decode and transform PBF blocks and read the
+spool back, and bounds the blocks in flight; one more thread reads the file and the
+calling thread writes output. `--cache-mb` sizes the SQLite cache for string dictionaries. `--sort-mb`
 limits each in-memory run when sorting node references, and `--spool-mb` limits
 tile output buffered in RAM. Exceeding either spills to scratch and never changes
 the output. The report's `buffers` section shows `sort_runs` and `spool_flushes`,
@@ -217,7 +217,9 @@ this index stays far smaller than one covering every node. Barrier and limit tag
 on those nodes go in a second small index. The third scans way blocks again,
 resolves locations through a memory map, and spools directed edges into one log
 with a list of chunks per tile, so tile count adds no scratch files. Decoding and
-per-block work happen on the worker threads, in order.
+per-block work happen on the worker threads, in order. Writing columns reads those
+chunks back concurrently, because the page cache may have evicted the log by then
+and each evicted chunk is a separate disk read.
 
 The native process keeps bounded PBF batches, one sort run (`--sort-mb`), buffered
 tile output (`--spool-mb`), a SQLite cache (`--cache-mb`), and an 8,192-entry string
