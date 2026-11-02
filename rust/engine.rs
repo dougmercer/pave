@@ -1,5 +1,5 @@
 use crate::index::{DiskIndex, RefSorter, database, writer};
-use crate::storage::{COLUMNS, Dictionaries, Spools};
+use crate::storage::{Attributes, COLUMNS, Dictionaries, Spools};
 use crate::tags::{self, HIGHWAYS, STRINGS, Tags};
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, SecondsFormat};
@@ -304,10 +304,10 @@ struct PreparedEdge {
     points: Range<usize>,
     reverse: bool,
     bbox: [f64; 4],
+    attributes: Attributes,
 }
 
 struct PreparedWay {
-    attributes: [u8; 50],
     strings: [Option<String>; 5],
     edges: Range<usize>,
 }
@@ -317,6 +317,20 @@ struct Prepared {
     ways: Vec<PreparedWay>,
     edges: Vec<PreparedEdge>,
     points: Vec<[f64; 2]>,
+}
+
+/// Great-circle metres along a polyline, on the IUGG mean Earth radius.
+fn length_m(points: &[[f64; 2]]) -> f64 {
+    points
+        .windows(2)
+        .map(|pair| {
+            let [lon1, lat1] = pair[0].map(f64::to_radians);
+            let [lon2, lat2] = pair[1].map(f64::to_radians);
+            let chord = ((lat2 - lat1) / 2.0).sin().powi(2)
+                + lat1.cos() * lat2.cos() * ((lon2 - lon1) / 2.0).sin().powi(2);
+            2.0 * 6_371_008.8 * chord.sqrt().asin()
+        })
+        .sum()
 }
 
 fn prepare_way(way: Way<'_>, nodes: &DiskIndex, out: &mut Prepared) -> Result<()> {
@@ -357,7 +371,7 @@ fn prepare_way(way: Way<'_>, nodes: &DiskIndex, out: &mut Prepared) -> Result<()
         .tags()
         .map(|(key, value)| (key.to_owned(), value.to_owned()))
         .collect();
-    let mut attributes = [0u8; 50];
+    let mut attributes: Attributes = [0; size_of::<Attributes>()];
     attributes[..8].copy_from_slice(&way.id().to_le_bytes());
     attributes[8..16].copy_from_slice(&tags::width(&tags).to_le_bytes());
     attributes[16] = highway;
@@ -400,6 +414,7 @@ fn prepare_way(way: Way<'_>, nodes: &DiskIndex, out: &mut Prepared) -> Result<()
             bbox[0] = -180.0;
             bbox[2] = 180.0;
         }
+        attributes[50..54].copy_from_slice(&(length_m(segment) as f32).to_le_bytes());
         if direction >= 0 {
             let (u, v) = (refs[start], refs[end]);
             out.edges.push(PreparedEdge {
@@ -408,6 +423,7 @@ fn prepare_way(way: Way<'_>, nodes: &DiskIndex, out: &mut Prepared) -> Result<()
                 points: points.clone(),
                 reverse: false,
                 bbox,
+                attributes,
             });
         }
         if direction <= 0 {
@@ -418,16 +434,13 @@ fn prepare_way(way: Way<'_>, nodes: &DiskIndex, out: &mut Prepared) -> Result<()
                 points: points.clone(),
                 reverse: true,
                 bbox,
+                attributes,
             });
         }
         start = end;
     }
     let edges = first_edge..out.edges.len();
-    out.ways.push(PreparedWay {
-        attributes,
-        strings,
-        edges,
-    });
+    out.ways.push(PreparedWay { strings, edges });
     Ok(())
 }
 
@@ -478,12 +491,14 @@ pub fn run(config: Config) -> Result<String> {
         |_, block| prepare_block(block, &nodes),
         |prepared| {
             for way in &prepared.ways {
-                let mut attributes = way.attributes;
+                let mut codes = [0u8; 20];
                 for (i, value) in way.strings.iter().enumerate() {
                     let code = dictionaries.code(i, value.as_deref())?;
-                    attributes[30 + i * 4..34 + i * 4].copy_from_slice(&code.to_le_bytes());
+                    codes[i * 4..i * 4 + 4].copy_from_slice(&code.to_le_bytes());
                 }
                 for edge in &prepared.edges[way.edges.clone()] {
+                    let mut attributes = edge.attributes;
+                    attributes[30..50].copy_from_slice(&codes);
                     let segment = &prepared.points[edge.points.clone()];
                     spools.append(
                         edge.u,

@@ -21,7 +21,7 @@ HIGHWAYS = (
 )
 HIGHWAY_CODES = {value: code for code, value in enumerate(HIGHWAYS)}
 STRINGS = ("access", "motor_vehicle", "hgv", "surface", "name")
-NUMBERS = ("maxspeed_kmh", "maxweight_t", "maxheight_m")
+NUMBERS = ("maxspeed_kmh", "maxweight_t", "maxheight_m", "length_m")
 FLAGS = {"bridge": 1, "tunnel": 2, "bridge_present": 4, "tunnel_present": 8}
 COLUMNS = {
     "u": "<i8",

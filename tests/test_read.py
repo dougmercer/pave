@@ -9,7 +9,7 @@ import pytest
 
 from osm_road_prep import iter_bbox_tiles, read_bbox
 from osm_road_prep.preprocess import preprocess
-from osm_road_prep.schema import COLUMNS
+from osm_road_prep.schema import COLUMNS, STRINGS
 
 
 @pytest.fixture
@@ -124,8 +124,9 @@ def test_file_count_does_not_grow_with_tiles(pbf, tmp_path):
     preprocess(grid(4), tmp_path / "few")
     preprocess(grid(40), tmp_path / "many")
     assert len(read_bbox(tmp_path / "many", -180, -90, 180, 90)["tile_ids"]) > 30
-    assert sum(1 for _ in (tmp_path / "few").rglob("*.npy")) == 26
-    assert sum(1 for _ in (tmp_path / "many").rglob("*.npy")) == 26
+    expected = 2 + len(COLUMNS) + 2 * len(STRINGS)  # Vertices, offsets, and two per dictionary.
+    assert sum(1 for _ in (tmp_path / "few").rglob("*.npy")) == expected
+    assert sum(1 for _ in (tmp_path / "many").rglob("*.npy")) == expected
 
 
 def test_columns_are_directly_loadable_with_global_offsets(scattered):

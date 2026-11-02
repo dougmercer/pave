@@ -12,8 +12,11 @@ use std::num::NonZeroUsize;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
-pub const ROW_BYTES: usize = 74;
-pub const COLUMNS: [(&str, &str, usize, usize); 14] = [
+pub const ROW_BYTES: usize = 78;
+pub const VERTEX_COUNT: usize = ROW_BYTES - 8;
+/// Everything in a row between `v` and the vertex count.
+pub type Attributes = [u8; VERTEX_COUNT - 16];
+pub const COLUMNS: [(&str, &str, usize, usize); 15] = [
     ("u", "<i8", 0, 8),
     ("v", "<i8", 8, 8),
     ("osmid", "<i8", 16, 8),
@@ -28,6 +31,7 @@ pub const COLUMNS: [(&str, &str, usize, usize); 14] = [
     ("hgv", "<i4", 54, 4),
     ("surface", "<i4", 58, 4),
     ("name", "<i4", 62, 4),
+    ("length_m", "<f4", 66, 4),
 ];
 
 pub fn npy(path: &Path, dtype: &str, shape: &[u64]) -> Result<BufWriter<File>> {
@@ -260,7 +264,7 @@ impl Spools {
         v: i64,
         geometry: &[[f64; 2]],
         reverse: bool,
-        attributes: &[u8; 50],
+        attributes: &Attributes,
         bbox: [f64; 4],
     ) -> Result<()> {
         let first = if reverse {
@@ -272,8 +276,8 @@ impl Spools {
         let mut row = [0u8; ROW_BYTES];
         row[..8].copy_from_slice(&u.to_le_bytes());
         row[8..16].copy_from_slice(&v.to_le_bytes());
-        row[16..66].copy_from_slice(attributes);
-        row[66..].copy_from_slice(&(geometry.len() as i64).to_le_bytes());
+        row[16..VERTEX_COUNT].copy_from_slice(attributes);
+        row[VERTEX_COUNT..].copy_from_slice(&(geometry.len() as i64).to_le_bytes());
         tile.rows.extend_from_slice(&row);
         for i in 0..geometry.len() {
             let point = geometry[if reverse { geometry.len() - i - 1 } else { i }];
@@ -383,7 +387,7 @@ impl Spools {
                 }
             }
             for row in rows.chunks_exact(ROW_BYTES) {
-                position += i64::from_le_bytes(row[66..].try_into().unwrap());
+                position += i64::from_le_bytes(row[VERTEX_COUNT..].try_into().unwrap());
                 offsets.write_all(&position.to_le_bytes())?;
             }
             vertices.write_all(coords)?;

@@ -122,6 +122,7 @@ ranges of each column, ordered by grid `x` and then `y`.
 | `width_m.npy` | float64 `(E,)` | Positive full carriageway width, same in both directions |
 | `highway.npy` | uint8 `(E,)` | Code in manifest `highway_enum` |
 | `maxspeed_kmh.npy`, `maxweight_t.npy`, `maxheight_m.npy` | float32 `(E,)` | Explicit converted limits; NaN when missing or not parseable |
+| `length_m.npy` | float32 `(E,)` | Great-circle length through every vertex, on a 6,371,008.8 m sphere |
 | `flags.npy` | uint8 `(E,)` | Boolean values and presence bits |
 | `access.npy`, `motor_vehicle.npy`, `hgv.npy`, `surface.npy`, `name.npy` | int32 `(E,)` | Global dictionary codes; `-1` means null |
 

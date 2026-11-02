@@ -1,4 +1,6 @@
+import itertools
 import json
+import math
 import random
 import subprocess
 import sys
@@ -407,3 +409,36 @@ def test_scratch_defaults_beside_the_output(pbf, tmp_path, monkeypatch):
     path = pbf({1: (0, 0), 2: (0.1, 0.1)}, [(1, [1, 2], {"highway": "road"})])
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "no-such-directory"))
     assert preprocess(path, tmp_path / "roads")["edges"] == 2
+
+
+def spherical_metres(points):
+    """Independent haversine over consecutive [lon, lat] points."""
+    radius = 6371008.8
+    total = 0.0
+    for (lon1, lat1), (lon2, lat2) in itertools.pairwise(points):
+        phi1, phi2 = math.radians(lat1), math.radians(lat2)
+        a = (
+            math.sin((phi2 - phi1) / 2) ** 2
+            + math.cos(phi1) * math.cos(phi2) * math.sin(math.radians(lon2 - lon1) / 2) ** 2
+        )
+        total += 2 * radius * math.asin(math.sqrt(a))
+    return total
+
+
+def test_length_sums_every_segment_in_both_directions(pbf, tmp_path):
+    nodes = {1: (0.01, 50), 2: (0.02, 50.01), 3: (0.05, 50)}
+    out = tmp_path / "roads"
+    preprocess(pbf(nodes, [(1, [1, 2, 3], {"highway": "residential"})]), out)
+    data = read_bbox(out, -180, -90, 180, 90)
+    assert len(data["u"]) == 2
+    expected = spherical_metres([nodes[1], nodes[2], nodes[3]])
+    assert data["length_m"].dtype == np.dtype("<f4")
+    np.testing.assert_allclose(data["length_m"], expected, rtol=1e-6)
+
+
+def test_length_crosses_the_antimeridian_the_short_way(pbf, tmp_path):
+    nodes = {1: (179.99, 0), 2: (-179.99, 0)}
+    out = tmp_path / "roads"
+    preprocess(pbf(nodes, [(1, [1, 2], {"highway": "road", "oneway": "yes"})]), out)
+    data = read_bbox(out, -180, -90, 180, 90)
+    np.testing.assert_allclose(data["length_m"], 2223.9, rtol=1e-3)

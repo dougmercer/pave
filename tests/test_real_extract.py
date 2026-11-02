@@ -85,6 +85,12 @@ def test_real_monaco_against_independent_parser(tmp_path):
     for tile in iter_bbox_tiles(out, -180, -90, 180, 90):
         for i, way_id in enumerate(tile["osmid"]):
             coords = tile["vertices"][tile["offsets"][i] : tile["offsets"][i + 1]]
+            radians = np.radians(coords)
+            half = np.diff(radians, axis=0) / 2
+            cosines = np.cos(radians[:-1, 1]) * np.cos(radians[1:, 1])
+            chord = np.sin(half[:, 1]) ** 2 + cosines * np.sin(half[:, 0]) ** 2
+            length = (2 * 6371008.8 * np.arcsin(np.sqrt(chord))).sum()
+            assert np.isclose(tile["length_m"][i], length, rtol=1e-5, atol=1e-3)
             integer_coords = tuple(map(tuple, np.rint(coords * 1e7).astype(np.int64)))
             actual[
                 (
