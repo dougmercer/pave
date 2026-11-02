@@ -2,20 +2,20 @@
 
 Measured 2026-11-02 with the Maturin **release** build on an **Apple M1 Max**
 (10 cores, 64 GiB), macOS 26.2 arm64, Python 3.15.0, NumPy 2.5.4, and rustc 1.93.0.
-Settings are the defaults: 0.1° tiles, 8 threads, 64 MiB sort runs, and 64 MiB tile
-buffers. Both extracts carry the PBF replication timestamp
+Settings are the defaults: 0.1° tiles, 8 threads, and 64 MiB tile buffers. Both extracts carry the PBF replication timestamp
 `2026-11-01T21:21:36Z`.
 
 | Extract | Input | Edges | Vertices | Tiles | Median time | Median edges/s | Peak RSS |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| [Luxembourg](https://download.geofabrik.de/europe/luxembourg.html) | 45.6 MiB | 269,803 | 1,635,960 | 52 | **0.36 s** | **743,041** | **266 MiB** |
-| [South America](https://download.geofabrik.de/south-america.html) | 3,963 MiB | 53,680,755 | 398,566,495 | 103,167 | **37.7 s** | **1,422,565** | **4,871 MiB** |
+| [Luxembourg](https://download.geofabrik.de/europe/luxembourg.html) | 45.6 MiB | 269,803 | 1,635,960 | 52 | **0.21 s** | **1,271,834** | **369 MiB** |
+| [South America](https://download.geofabrik.de/south-america.html) | 3,963 MiB | 53,680,755 | 398,566,495 | 103,167 | **21.6 s** | **2,488,641** | **5,052 MiB** |
 
 Including Python startup and imports, median CLI throughput was
-619,361 edges/s on Luxembourg and 1,419,550 edges/s on South America.
+958,374 edges/s on Luxembourg and 2,474,370 edges/s on South America.
 
 Peak RSS includes resident pages of the memory-mapped location index, which the OS
-can reclaim. South America's heap footprint was about 700 MiB of its 4.9 GiB.
+can reclaim. South America's heap footprint was about 2.5 GiB of its 4.9 GiB, most of
+it the bitmap of used nodes.
 
 ## Individual runs
 
@@ -29,17 +29,17 @@ Luxembourg:
 
 | Run | Seconds | Topology | Edges | Columns | Edges/s | CLI edges/s | Peak RSS MiB |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 0.40 | 0.23 | 0.14 | 0.03 | 666,421 | 563,543 | 253.0 |
-| 2 | 0.35 | 0.19 | 0.13 | 0.02 | 766,820 | 635,123 | 265.5 |
-| 3 | 0.36 | 0.20 | 0.14 | 0.02 | 743,041 | 619,361 | 254.7 |
+| 1 | 0.27 | 0.15 | 0.09 | 0.03 | 998,742 | 749,016 | 361.7 |
+| 2 | 0.21 | 0.09 | 0.09 | 0.03 | 1,271,834 | 958,374 | 359.3 |
+| 3 | 0.21 | 0.09 | 0.09 | 0.02 | 1,308,032 | 976,855 | 369.0 |
 
 South America:
 
 | Run | Seconds | Topology | Edges | Columns | Edges/s | CLI edges/s | Peak RSS MiB |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 37.55 | 16.40 | 14.46 | 6.60 | 1,429,439 | 1,426,460 | 4814.4 |
-| 2 | 38.26 | 16.77 | 14.81 | 6.58 | 1,402,987 | 1,400,020 | 4846.8 |
-| 3 | 37.74 | 16.34 | 14.70 | 6.59 | 1,422,565 | 1,419,550 | 4870.7 |
+| 1 | 21.57 | 6.10 | 8.61 | 6.77 | 2,488,641 | 2,474,370 | 5036.8 |
+| 2 | 20.93 | 6.03 | 8.08 | 6.74 | 2,564,950 | 2,551,221 | 5035.3 |
+| 3 | 21.74 | 6.05 | 8.29 | 7.31 | 2,469,633 | 2,455,376 | 5051.8 |
 
 Writing columns reads the spool log back in tile order after writing the output has
 evicted much of it from the page cache, so those reads run concurrently and each
@@ -66,9 +66,9 @@ about 319,000 tile envelopes. Tile size also affects the build and the first rea
 
 | Tile size | Tiles | Build | Manifest | First open in a process |
 | --- | ---: | ---: | ---: | ---: |
-| 0.25° | 20,221 | 37.2 s | 3.6 MiB | 60 ms |
-| 0.1° | 103,167 | 37.7 s | 21.8 MiB | 256 ms |
-| 0.05° | 318,942 | 40.1 s | 67.6 MiB | 806 ms |
+| 0.25° | 20,221 | 20.7 s | 3.6 MiB | 60 ms |
+| 0.1° | 103,167 | 21.6 s | 21.8 MiB | 256 ms |
+| 0.05° | 318,942 | 22.6 s | 67.6 MiB | 806 ms |
 
 ## Sources
 

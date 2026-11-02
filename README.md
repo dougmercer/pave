@@ -33,10 +33,9 @@ prep input.osm.pbf outdir/ --tile-degrees 0.1 --workdir /fast-disk/scratch \
 ```
 
 Scratch files go beside the output unless `--workdir` names another disk.
-`--threads` sets the workers that decode and transform PBF blocks and read the
-spool back, and bounds the blocks in flight; one more thread reads the file, the
-calling thread assigns string codes, and one more spools edges. `--spool-mb` limits
-tile output buffered in RAM. Exceeding it spills to scratch and never changes the
+`--threads` sets the workers that read, decode, and transform PBF blocks and read the
+spool back, and bounds the blocks in flight; the calling thread assigns string codes
+and one more spools edges. `--spool-mb` limits tile output buffered in RAM. Exceeding it spills to scratch and never changes the
 output. The report's `buffers` section shows `spool_flushes`, which reveals whether a
 larger setting would help. `--quiet` suppresses stderr
 progress. Stdout is a JSON performance report, also saved as `outdir/stats.json`.
@@ -216,14 +215,15 @@ smaller than one covering every node. Barrier and limit tags on those nodes go i
 second small index. The third scans way blocks again, resolves locations through a
 memory map, and spools directed edges into one log
 with a list of chunks per tile, so tile count adds no scratch files. Decoding and
-per-block work happen on the worker threads, in order. Writing columns reads those
+per-block work happen on the worker threads, in order, including writing each
+block's edges in spool format grouped by tile. Writing columns reads those
 chunks back concurrently, because the page cache may have evicted the log by then.
 Each spill is written in tile order, so neighbouring tiles' chunks can share a read.
 
 The native process keeps bounded PBF batches and buffered tile output (`--spool-mb`).
 The node bitmap uses 2 bits per ID in the range an extract's nodes span, about 3.3 GiB
 at most for today's IDs, allocated in 4,096-ID leaves only where a road uses a node, plus
-a 16-byte table entry and 8-byte rank per 4,096 IDs of that range. Dictionaries of distinct strings stay in RAM, which grows
+40 bytes of tables per 4,096 IDs of that range. Dictionaries of distinct strings stay in RAM, which grows
 with an extract's road names rather than its geometry. Tile metadata and each tile's
 list of spool chunks stay in RAM too, which scales with the tile count and flushes
 rather than the extract size, as does the small table of distinct barrier values. No complete extract, topology hash map, or tile's complete geometry
