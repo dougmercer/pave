@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+target/
+*.so
+*.dylib
+*.osm.pbf
+!tests/data/monaco.osm.pbf
+

@@ -1,0 +1,34 @@
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[project]
+name = "osm-road-prep"
+version = "0.1.0"
+description = "Disk-backed OSM PBF to tiled, memory-mappable directed road graphs"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["numpy>=2.0,<3"]
+
+[project.scripts]
+prep = "osm_road_prep.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.9", "osmium>=4.0,<5", "maturin>=1.9,<2"]
+
+[tool.maturin]
+python-source = "src"
+module-name = "osm_road_prep._native"
+profile = "release"
+include = ["tests/**", "benchmarks/**", "README.md"]
+exclude = ["**/__pycache__/**", "**/*.pyc", "dist/**", "target/**", ".venv/**"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
