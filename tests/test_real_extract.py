@@ -25,6 +25,7 @@ DRIVABLE = {
     "primary_link",
     "secondary_link",
     "tertiary_link",
+    "living_street",
 }
 
 
@@ -103,5 +104,5 @@ def test_real_monaco_against_independent_parser(tmp_path):
             ] += 1
     assert actual == expected
     assert stats["implementation"] == "rust"
-    assert stats["edges"] == 2352
+    assert stats["edges"] == 2354
     assert stats["source"]["timestamp"] == "2026-11-01T21:21:36Z"

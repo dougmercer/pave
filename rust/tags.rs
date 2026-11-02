@@ -2,7 +2,7 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-pub const HIGHWAYS: [&str; 15] = [
+pub const HIGHWAYS: [&str; 16] = [
     "motorway",
     "trunk",
     "primary",
@@ -18,6 +18,7 @@ pub const HIGHWAYS: [&str; 15] = [
     "primary_link",
     "secondary_link",
     "tertiary_link",
+    "living_street",
 ];
 pub const STRINGS: [&str; 5] = ["access", "motor_vehicle", "hgv", "surface", "name"];
 pub type Tags = HashMap<String, String>;

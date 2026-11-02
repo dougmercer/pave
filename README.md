@@ -137,7 +137,7 @@ Code `c >= 0` selects the bytes between offsets `c` and `c + 1`.
 Empty strings are real values, distinct from null. No strings are normalized.
 The manifest provides dictionary paths, encoding, counts, and the null code.
 
-The highway enum is stable in version 1:
+The highway enum is stable in version 2:
 
 ```text
 0 motorway          5 unclassified       10 motorway_link
@@ -145,6 +145,7 @@ The highway enum is stable in version 1:
 2 primary           7 service            12 primary_link
 3 secondary         8 track              13 secondary_link
 4 tertiary          9 road               14 tertiary_link
+                                         15 living_street
 ```
 
 The grid origin is `[-180, -90]`. Cell coordinates are
@@ -168,7 +169,7 @@ does not supply a timestamp. `source` records the filename, size, and generator.
 
 ## Graph and tag semantics
 
-Only the fifteen highway classes in the enum are included. Access tags do not
+Only the sixteen highway classes in the enum are included. Access tags do not
 filter roads. A junction is any endpoint of a drivable way or any node referenced
 by at least two distinct drivable ways. Repeated references within a single way
 count once. Shape nodes remain in the polyline. Closed roads retain their closing
@@ -186,7 +187,8 @@ Turn restrictions and all other relations are ignored.
 Width precedence is a positive `width`, then positive `lanes × 3.5`, then service
 subtype (`driveway=3`, `parking_aisle=5.5`, `alley=3.5`), then class defaults:
 motorway 11, trunk 9, primary 7.5, secondary 7, tertiary 6.5, unclassified /
-residential / road 5.5, service 4, track 3.5, otherwise 4 metres. Link class
+residential / road 5.5, service 4, track 3.5, otherwise (including living_street)
+4 metres. Link class
 defaults are their base default × 0.6. Width is not divided by direction.
 
 Explicit numeric tags accept unambiguous decimal/scientific quantities. Speed

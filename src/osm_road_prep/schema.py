@@ -18,6 +18,7 @@ HIGHWAYS = (
     "primary_link",
     "secondary_link",
     "tertiary_link",
+    "living_street",
 )
 HIGHWAY_CODES = {value: code for code, value in enumerate(HIGHWAYS)}
 STRINGS = ("access", "motor_vehicle", "hgv", "surface", "name")

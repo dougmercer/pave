@@ -18,6 +18,7 @@ from osm_road_prep.tags import direction, flags, scalar, width_m
         ("road", 5.5),
         ("service", 4),
         ("track", 3.5),
+        ("living_street", 4),
         ("unknown", 4),
         ("motorway_link", 6.6),
         ("trunk_link", 5.4),

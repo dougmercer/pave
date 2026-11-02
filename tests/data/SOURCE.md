@@ -14,4 +14,4 @@ This data fixture is not covered by any source-code license.
 
 The independent test oracle uses pyosmium only in tests. It compares every
 expected directed edge, global endpoint ID, highway class, and original vertex
-against the Rust output. The fixed extract produces 2,352 directed edges.
+against the Rust output. The fixed extract produces 2,354 directed edges.
