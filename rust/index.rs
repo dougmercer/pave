@@ -144,7 +144,8 @@ impl RefSorter {
     }
 
     /// Merge runs into sorted unique `(id << 1) | junction` keys for every referenced node.
-    pub fn export_used(mut self, path: &Path, pool: &rayon::ThreadPool) -> Result<()> {
+    /// Returns the number of sorted runs, which shows whether `sort_mb` was exceeded.
+    pub fn export_used(mut self, path: &Path, pool: &rayon::ThreadPool) -> Result<usize> {
         if !self.buffer.is_empty() {
             self.spill(pool)?;
         }
@@ -187,7 +188,7 @@ impl RefSorter {
         for run in &self.runs {
             std::fs::remove_file(run)?;
         }
-        Ok(())
+        Ok(self.runs.len())
     }
 }
 

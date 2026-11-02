@@ -13,8 +13,6 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::sync_channel;
 use std::time::Instant;
 
-/// Edge rows and vertices buffered across all tiles before spilling to scratch.
-const SPOOL_BYTES: usize = 64 << 20;
 const UNSORTED_NODES: &str = "Nodes must have unique ascending IDs; use a sorted snapshot extract";
 const UNSORTED_FILE: &str = "PBF header claims Sort.Type_then_ID but elements are not sorted";
 const UNSORTED_WAYS: &str = "Ways must have unique ascending IDs; use a sorted snapshot extract";
@@ -24,7 +22,12 @@ pub struct Config {
     pub output: PathBuf,
     pub scratch: PathBuf,
     pub degrees: f64,
+    /// SQLite page cache for the string dictionaries.
     pub cache_mb: usize,
+    /// In-memory run size for the external sort of node references.
+    pub sort_mb: usize,
+    /// Edge rows and vertices buffered across all tiles before spilling to scratch.
+    pub spool_mb: usize,
     pub threads: usize,
     pub quiet: bool,
     /// Polled between batches on the calling thread, so Ctrl-C is not deferred to the end.
@@ -250,8 +253,8 @@ fn topology(
     pool: &rayon::ThreadPool,
     data: &[u64],
     boundary: usize,
-) -> Result<(Vec<u64>, u64)> {
-    let mut sorter = RefSorter::new(&config.scratch, config.cache_mb << 20);
+) -> Result<(Vec<u64>, u64, usize)> {
+    let mut sorter = RefSorter::new(&config.scratch, config.sort_mb << 20);
     let (mut way_blocks, mut ways, mut last_way) = (Vec::new(), 0, None);
     pipeline(config, pool, &data[boundary..], scan_ways, |scan| {
         if let Some((first, last)) = scan.range {
@@ -263,7 +266,7 @@ fn topology(
         sorter.extend(&scan.keys, pool)
     })?;
     let used_path = config.scratch.join("used.idx");
-    sorter.export_used(&used_path, pool)?;
+    let sort_runs = sorter.export_used(&used_path, pool)?;
     let used = DiskIndex::open(&used_path, 8)?;
     let mut locations = writer(&config.scratch.join("locations.idx"))?;
     let mut last_node = None;
@@ -292,7 +295,7 @@ fn topology(
     locations.flush()?;
     drop(used);
     fs::remove_file(used_path)?;
-    Ok((way_blocks, ways))
+    Ok((way_blocks, ways, sort_runs))
 }
 
 struct PreparedEdge {
@@ -444,8 +447,8 @@ pub fn run(config: Config) -> Result<String> {
         "tile_degrees must be finite and in (0, 180]"
     );
     ensure!(
-        config.threads > 0 && config.cache_mb > 0,
-        "threads and cache_mb must be positive"
+        config.threads > 0 && config.cache_mb > 0 && config.sort_mb > 0 && config.spool_mb > 0,
+        "threads, cache_mb, sort_mb and spool_mb must be positive"
     );
     let log = |message| {
         if !config.quiet {
@@ -458,7 +461,7 @@ pub fn run(config: Config) -> Result<String> {
     let phase = Instant::now();
     log("Pass 1/2: building disk-backed node locations and junction incidence (Rust)");
     let (source, data, boundary) = layout(&config)?;
-    let (way_blocks, ways) = topology(&config, &pool, &data, boundary)?;
+    let (way_blocks, ways, sort_runs) = topology(&config, &pool, &data, boundary)?;
     let topology_seconds = phase.elapsed().as_secs_f64();
     let phase = Instant::now();
     log("Pass 2/2: splitting ways and spooling directed edges (Rust)");
@@ -466,7 +469,7 @@ pub fn run(config: Config) -> Result<String> {
     let nodes = DiskIndex::open(&locations_path, 24)?;
     let db = database(&config.scratch.join("output.sqlite"), config.cache_mb)?;
     let mut dictionaries = Dictionaries::new(&db)?;
-    let mut spools = Spools::new(&config.scratch, config.degrees, SPOOL_BYTES)?;
+    let mut spools = Spools::new(&config.scratch, config.degrees, config.spool_mb << 20)?;
     db.execute_batch("BEGIN")?;
     pipeline(
         &config,
@@ -531,7 +534,9 @@ pub fn run(config: Config) -> Result<String> {
         "edges": spools.edges, "vertices": spools.vertices, "tiles": tiles, "drivable_ways": ways,
         "stages": {"topology_seconds": topology_seconds, "edges_seconds": edges_seconds,
                    "columns_seconds": phase.elapsed().as_secs_f64()}, "source": source,
-        "settings": {"tile_degrees": config.degrees, "cache_mb": config.cache_mb, "threads": config.threads},
+        "settings": {"tile_degrees": config.degrees, "cache_mb": config.cache_mb, "sort_mb": config.sort_mb,
+                     "spool_mb": config.spool_mb, "threads": config.threads},
+        "buffers": {"sort_runs": sort_runs, "spool_flushes": spools.flushes},
         "implementation": "rust",
     }))?)
 }

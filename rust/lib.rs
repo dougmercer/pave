@@ -17,6 +17,8 @@ fn build(
     scratch: PathBuf,
     tile_degrees: f64,
     cache_mb: usize,
+    sort_mb: usize,
+    spool_mb: usize,
     threads: usize,
     quiet: bool,
 ) -> PyResult<String> {
@@ -26,6 +28,8 @@ fn build(
         scratch,
         degrees: tile_degrees,
         cache_mb,
+        sort_mb,
+        spool_mb,
         threads,
         quiet,
         interrupted: Box::new(|| Python::attach(|py| py.check_signals()).map_err(Into::into)),

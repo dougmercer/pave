@@ -1,4 +1,5 @@
 import json
+import random
 import subprocess
 import sys
 
@@ -337,3 +338,63 @@ def test_native_matches_independent_graph_oracle(pbf, tmp_path):
         np.testing.assert_allclose(geom, [nodes[node] for node in refs], rtol=0, atol=1e-14)
         actual.append((int(wid), refs))
     assert sorted(actual) == sorted(expected)
+
+
+def dataset_files(root):
+    return {
+        path.relative_to(root): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file() and path.name != "stats.json"
+    }
+
+
+def test_threads_default_to_eight(pbf, tmp_path):
+    path = pbf({1: (0, 0), 2: (0.1, 0.1)}, [(1, [1, 2], {"highway": "road"})])
+    assert preprocess(path, tmp_path / "roads")["settings"]["threads"] == 8
+
+
+def test_small_buffers_spill_without_changing_output(pbf, tmp_path):
+    # 1 MiB holds 131,072 sort keys, so 200,000 references need several sorted runs,
+    # and both directions of 200,000 vertices overflow a 1 MiB tile buffer.
+    count = 200_000
+    nodes = {i + 1: ((i % 700) * 0.01, (i // 700) * 0.01) for i in range(count)}
+    # Shuffled IDs make ways arrive out of spatial order, so tiles are flushed repeatedly.
+    ids = random.Random(11).sample(range(1, count), count // 50 - 1)
+    ways = [
+        (ids[i], [*range(i * 50 + 1, i * 50 + 52)], {"highway": "road", "name": f"w{i % 7}"})
+        for i in range(len(ids))
+    ]
+    path = pbf(nodes, ways)
+    small = preprocess(path, tmp_path / "small", sort_mb=1, spool_mb=1)
+    large = preprocess(path, tmp_path / "large", sort_mb=64, spool_mb=64)
+    assert small["buffers"]["sort_runs"] > 1
+    assert small["buffers"]["spool_flushes"] > large["buffers"]["spool_flushes"]
+    assert small["settings"]["sort_mb"] == 1
+    assert small["settings"]["spool_mb"] == 1
+    assert dataset_files(tmp_path / "small") == dataset_files(tmp_path / "large")
+
+
+@pytest.mark.parametrize("setting", ["cache_mb", "sort_mb", "spool_mb", "threads"])
+def test_buffer_settings_must_be_positive(pbf, tmp_path, setting):
+    path = pbf({1: (0, 0), 2: (0.1, 0.1)}, [(1, [1, 2], {"highway": "road"})])
+    with pytest.raises(ValueError, match="positive"):
+        preprocess(path, tmp_path / "roads", **{setting: 0})
+
+
+def test_cli_passes_buffer_settings(pbf, tmp_path):
+    path = pbf({1: (0, 0), 2: (0.1, 0.1)}, [(1, [1, 2], {"highway": "road"})])
+    command = [
+        sys.executable,
+        "-m",
+        "osm_road_prep.cli",
+        str(path),
+        str(tmp_path / "roads"),
+        "--quiet",
+        "--sort-mb",
+        "3",
+        "--spool-mb",
+        "5",
+    ]
+    run = subprocess.run(command, check=True, capture_output=True, text=True)
+    settings = json.loads(run.stdout)["settings"]
+    assert (settings["sort_mb"], settings["spool_mb"]) == (3, 5)

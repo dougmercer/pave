@@ -14,11 +14,15 @@ def main(argv=None) -> int:
     parser.add_argument("--tile-degrees", type=float, default=0.25)
     parser.add_argument("--workdir", help="Directory for disk-backed scratch indexes and spools")
     parser.add_argument(
-        "--cache-mb", type=int, default=32, help="SQLite cache size (default: 32 MiB)"
+        "--cache-mb", type=int, default=32, help="SQLite dictionary cache (default: 32 MiB)"
     )
     parser.add_argument(
-        "--threads", type=int, default=2, help="PBF decompression threads (default: 2)"
+        "--sort-mb", type=int, default=64, help="Node reference sort run size (default: 64 MiB)"
     )
+    parser.add_argument(
+        "--spool-mb", type=int, default=64, help="Buffered tile output (default: 64 MiB)"
+    )
+    parser.add_argument("--threads", type=int, default=8, help="PBF decode workers (default: 8)")
     parser.add_argument("--quiet", action="store_true", help="Suppress progress on stderr")
     args = parser.parse_args(argv)
     try:
@@ -28,6 +32,8 @@ def main(argv=None) -> int:
             tile_degrees=args.tile_degrees,
             workdir=args.workdir,
             cache_mb=args.cache_mb,
+            sort_mb=args.sort_mb,
+            spool_mb=args.spool_mb,
             threads=args.threads,
             progress=None if args.quiet else lambda message: print(message, file=sys.stderr),
         )

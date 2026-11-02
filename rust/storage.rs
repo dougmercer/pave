@@ -161,6 +161,7 @@ pub struct Spools {
     limit: usize,
     pub edges: u64,
     pub vertices: u64,
+    pub flushes: u64,
 }
 
 impl Spools {
@@ -175,6 +176,7 @@ impl Spools {
             limit,
             edges: 0,
             vertices: 0,
+            flushes: 0,
         })
     }
 
@@ -203,6 +205,7 @@ impl Spools {
                 Self::append_file(&self.scratch.join(format!("{id}.coords")), &tile.coords)?;
             }
             self.buffered -= tile.rows.len() + tile.coords.len();
+            self.flushes += 1;
             tile.rows = Vec::new();
             tile.coords = Vec::new();
         }
