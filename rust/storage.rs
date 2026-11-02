@@ -12,13 +12,13 @@ use std::num::NonZeroUsize;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
-pub const ROW_BYTES: usize = 90;
+pub const ROW_BYTES: usize = 98;
 pub const VERTEX_COUNT: usize = ROW_BYTES - 8;
 /// Everything in a row between `v` and the vertex count.
 pub type Attributes = [u8; VERTEX_COUNT - 16];
 /// Where each `STRINGS` code sits within `Attributes`.
-pub const STRING_SLOTS: [usize; STRINGS.len()] = [30, 34, 38, 42, 46, 62];
-pub const COLUMNS: [(&str, &str, usize, usize); 18] = [
+pub const STRING_SLOTS: [usize; STRINGS.len()] = [30, 34, 38, 42, 46, 62, 66, 70];
+pub const COLUMNS: [(&str, &str, usize, usize); 20] = [
     ("u", "<i8", 0, 8),
     ("v", "<i8", 8, 8),
     ("osmid", "<i8", 16, 8),
@@ -37,6 +37,8 @@ pub const COLUMNS: [(&str, &str, usize, usize); 18] = [
     ("maxwidth_m", "<f4", 70, 4),
     ("maxlength_m", "<f4", 74, 4),
     ("vehicle", "<i4", 78, 4),
+    ("barrier", "<i4", 82, 4),
+    ("barrier_at_v", "<i4", 86, 4),
 ];
 
 pub fn npy(path: &Path, dtype: &str, shape: &[u64]) -> Result<BufWriter<File>> {

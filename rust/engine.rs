@@ -1,11 +1,12 @@
-use crate::index::{DiskIndex, RefSorter, database, writer};
+use crate::index::{DiskIndex, KEY_BITS, NodeTags, RefSorter, TAGGED, database, writer};
 use crate::storage::{Attributes, COLUMNS, Dictionaries, STRING_SLOTS, Spools};
-use crate::tags::{self, HIGHWAYS, STRINGS, Tags};
+use crate::tags::{self, HIGHWAYS, STRINGS, Tags, WAY_STRINGS};
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, SecondsFormat};
 use osmpbf::{BlobReader, BlobType, ByteOffset, Element, HeaderBlock, PrimitiveBlock, Way};
 use rayon::prelude::*;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::ops::Range;
@@ -194,28 +195,50 @@ fn scan_ways(offset: u64, block: PrimitiveBlock) -> Result<WayScan> {
             refs.dedup(); // Distinct ways, not repeated occurrences within a way.
             scan.keys.extend(
                 refs.iter()
-                    .map(|&id| (id << 1) | i64::from(id == first || id == last)),
+                    .map(|&id| (id << KEY_BITS) | i64::from(id == first || id == last)),
             );
         }
     }
     Ok(scan)
 }
 
+#[derive(Default)]
 struct NodeScan {
     records: Vec<u8>,
+    tagged: Vec<(i64, Option<String>, [f32; 3])>,
     range: Option<(i64, i64)>,
+    position: usize,
 }
 
-fn scan_nodes(block: PrimitiveBlock, used: &DiskIndex, nodes_only: bool) -> Result<NodeScan> {
-    let mut scan = NodeScan {
-        records: Vec::new(),
-        range: None,
-    };
-    let mut position = 0;
-    let mut visit = |id: i64, lon: i64, lat: i64| -> Result<()> {
-        scan.range = match scan.range {
+/// The barrier and limits on a node, if it has any.
+fn read_node_tags<'a>(
+    node_tags: impl Iterator<Item = (&'a str, &'a str)>,
+) -> Option<(Option<String>, [f32; 3])> {
+    let (mut barrier, mut limits) = (None, [f32::NAN; 3]);
+    for (key, value) in node_tags {
+        match key {
+            "barrier" => barrier = Some(value.to_owned()),
+            "maxheight" => limits[0] = tags::limit(Some(value), "length"),
+            "maxweight" => limits[1] = tags::limit(Some(value), "weight"),
+            "maxwidth" => limits[2] = tags::limit(Some(value), "length"),
+            _ => (),
+        }
+    }
+    (barrier.is_some() || limits.iter().any(|limit| !limit.is_nan())).then_some((barrier, limits))
+}
+
+impl NodeScan {
+    fn visit<'a>(
+        &mut self,
+        used: &DiskIndex,
+        id: i64,
+        lon: i64,
+        lat: i64,
+        node_tags: impl Iterator<Item = (&'a str, &'a str)>,
+    ) -> Result<()> {
+        self.range = match self.range {
             None => {
-                position = used.lower_bound(id);
+                self.position = used.lower_bound(id);
                 Some((id, id))
             }
             Some((first, last)) => {
@@ -223,24 +246,38 @@ fn scan_nodes(block: PrimitiveBlock, used: &DiskIndex, nodes_only: bool) -> Resu
                 Some((first, id))
             }
         };
-        while position < used.len() && used.key(position) >> 1 < id {
-            position += 1;
+        while self.position < used.len() && used.key(self.position) >> KEY_BITS < id {
+            self.position += 1;
         }
-        if position < used.len() && used.key(position) >> 1 == id {
-            scan.records
-                .extend_from_slice(&used.key(position).to_le_bytes());
-            scan.records
+        if self.position < used.len() && used.key(self.position) >> KEY_BITS == id {
+            let mut key = used.key(self.position);
+            if let Some((barrier, limits)) = read_node_tags(node_tags) {
+                key |= TAGGED;
+                self.tagged.push((key, barrier, limits));
+            }
+            self.records.extend_from_slice(&key.to_le_bytes());
+            self.records
                 .extend_from_slice(&(lon as f64 / 1e9).to_le_bytes());
-            scan.records
+            self.records
                 .extend_from_slice(&(lat as f64 / 1e9).to_le_bytes());
-            position += 1;
+            self.position += 1;
         }
         Ok(())
-    };
+    }
+}
+
+fn scan_nodes(block: PrimitiveBlock, used: &DiskIndex, nodes_only: bool) -> Result<NodeScan> {
+    let mut scan = NodeScan::default();
     for element in block.elements() {
         match element {
-            Element::Node(node) => visit(node.id(), node.nano_lon(), node.nano_lat())?,
-            Element::DenseNode(node) => visit(node.id(), node.nano_lon(), node.nano_lat())?,
+            Element::Node(node) => {
+                let (id, lon, lat) = (node.id(), node.nano_lon(), node.nano_lat());
+                scan.visit(used, id, lon, lat, node.tags())?
+            }
+            Element::DenseNode(node) => {
+                let (id, lon, lat) = (node.id(), node.nano_lon(), node.nano_lat());
+                scan.visit(used, id, lon, lat, node.tags())?
+            }
             // A file that lies about its sort order must not silently lose ways.
             Element::Way(_) | Element::Relation(_) => ensure!(!nodes_only, UNSORTED_FILE),
         }
@@ -253,7 +290,7 @@ fn topology(
     pool: &rayon::ThreadPool,
     data: &[u64],
     boundary: usize,
-) -> Result<(Vec<u64>, u64, usize)> {
+) -> Result<(Vec<u64>, u64, usize, Vec<String>)> {
     let mut sorter = RefSorter::new(&config.scratch, config.sort_mb << 20);
     let (mut way_blocks, mut ways, mut last_way) = (Vec::new(), 0, None);
     pipeline(config, pool, &data[boundary..], scan_ways, |scan| {
@@ -269,6 +306,9 @@ fn topology(
     let sort_runs = sorter.export_used(&used_path, pool)?;
     let used = DiskIndex::open(&used_path, 8)?;
     let mut locations = writer(&config.scratch.join("locations.idx"))?;
+    let mut node_tags = writer(&config.scratch.join("node_tags.idx"))?;
+    // Distinct barrier values are few, so workers can share them as a table in RAM.
+    let (mut barriers, mut barrier_codes) = (Vec::new(), HashMap::new());
     let mut last_node = None;
     let node_end = if boundary == 0 {
         data.len()
@@ -289,13 +329,23 @@ fn topology(
                 last_node = Some(last);
             }
             locations.write_all(&scan.records)?;
+            for (key, barrier, limits) in scan.tagged {
+                let barrier = barrier.map(|value| {
+                    *barrier_codes.entry(value.clone()).or_insert_with(|| {
+                        barriers.push(value);
+                        barriers.len() as u32 - 1
+                    })
+                });
+                node_tags.write_all(&NodeTags { barrier, limits }.record(key))?;
+            }
             Ok(())
         },
     )?;
     locations.flush()?;
+    node_tags.flush()?;
     drop(used);
     fs::remove_file(used_path)?;
-    Ok((way_blocks, ways, sort_runs))
+    Ok((way_blocks, ways, sort_runs, barriers))
 }
 
 struct PreparedEdge {
@@ -305,11 +355,20 @@ struct PreparedEdge {
     reverse: bool,
     bbox: [f64; 4],
     attributes: Attributes,
+    barrier: Option<String>,
+    barrier_at_v: Option<String>,
 }
 
 struct PreparedWay {
-    strings: [Option<String>; STRINGS.len()],
+    strings: [Option<String>; WAY_STRINGS],
     edges: Range<usize>,
+}
+
+/// Read-only indexes the workers share while building edges.
+struct Lookups<'a> {
+    nodes: &'a DiskIndex,
+    node_tags: &'a DiskIndex,
+    barriers: &'a [String],
 }
 
 #[derive(Default)]
@@ -333,7 +392,7 @@ fn length_m(points: &[[f64; 2]]) -> f64 {
         .sum()
 }
 
-fn prepare_way(way: Way<'_>, nodes: &DiskIndex, out: &mut Prepared) -> Result<()> {
+fn prepare_way(way: Way<'_>, lookups: &Lookups<'_>, out: &mut Prepared) -> Result<()> {
     let Some(highway) = way.tags().find_map(|(key, value)| {
         if key == "highway" {
             tags::highway_code(value)
@@ -349,13 +408,15 @@ fn prepare_way(way: Way<'_>, nodes: &DiskIndex, out: &mut Prepared) -> Result<()
     }
     let base = out.points.len();
     let mut junction = Vec::with_capacity(refs.len());
+    let mut node_tags = Vec::with_capacity(refs.len());
     for &id in &refs {
-        let (point, is_junction) = nodes.location(id).with_context(|| {
+        let location = lookups.nodes.location(id).with_context(|| {
             format!(
                 "Drivable way {} references missing node {id}; use a complete extract",
                 way.id()
             )
         })?;
+        let point = location.point;
         ensure!(
             point[0].is_finite()
                 && point[1].is_finite()
@@ -365,7 +426,12 @@ fn prepare_way(way: Way<'_>, nodes: &DiskIndex, out: &mut Prepared) -> Result<()
             way.id()
         );
         out.points.push(point);
-        junction.push(is_junction);
+        junction.push(location.junction);
+        node_tags.push(if location.tagged {
+            lookups.node_tags.node_tags(id)
+        } else {
+            None
+        });
     }
     let tags: Tags = way
         .tags()
@@ -396,7 +462,13 @@ fn prepare_way(way: Way<'_>, nodes: &DiskIndex, out: &mut Prepared) -> Result<()
     let forward_speed = directed_speed("maxspeed:forward");
     let backward_speed = directed_speed("maxspeed:backward");
     attributes[29] = tags::flags(&tags);
-    let strings = STRINGS.map(|name| tags::get(&tags, name).map(str::to_owned));
+    let strings = std::array::from_fn(|i| tags::get(&tags, STRINGS[i]).map(str::to_owned));
+    let limit = |name, kind| tags::limit(tags::get(&tags, name), kind);
+    let way_limits = [
+        limit("maxheight", "length"),
+        limit("maxweight", "weight"),
+        limit("maxwidth", "length"),
+    ];
     let direction = tags::direction(&tags);
     let first_edge = out.edges.len();
     let mut start = 0;
@@ -424,28 +496,54 @@ fn prepare_way(way: Way<'_>, nodes: &DiskIndex, out: &mut Prepared) -> Result<()
             bbox[2] = 180.0;
         }
         attributes[50..54].copy_from_slice(&(length_m(segment) as f32).to_le_bytes());
-        if direction >= 0 {
-            let (u, v) = (refs[start], refs[end]);
-            attributes[17..21].copy_from_slice(&forward_speed.to_le_bytes());
+        let interior = &node_tags[start + 1..end];
+        for (reverse, u, v, speed, arrival) in [
+            (false, refs[start], refs[end], forward_speed, node_tags[end]),
+            (
+                true,
+                refs[end],
+                refs[start],
+                backward_speed,
+                node_tags[start],
+            ),
+        ] {
+            if (reverse && direction > 0) || (!reverse && direction < 0) {
+                continue;
+            }
+            let mut limits = way_limits;
+            for node in interior.iter().flatten().chain(&arrival) {
+                for (limit, value) in limits.iter_mut().zip(node.limits) {
+                    *limit = limit.min(value); // f32::min ignores a missing (NaN) limit.
+                }
+            }
+            for (offset, value) in [
+                (25, limits[0]),
+                (21, limits[1]),
+                (54, limits[2]),
+                (17, speed),
+            ] {
+                attributes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            }
+            let barrier_name = |code: u32| lookups.barriers[code as usize].as_str();
+            let mut barriers: Vec<_> = interior
+                .iter()
+                .flatten()
+                .filter_map(|node| node.barrier.map(barrier_name))
+                .collect();
+            if reverse {
+                barriers.reverse();
+            }
             out.edges.push(PreparedEdge {
                 u,
                 v,
                 points: points.clone(),
-                reverse: false,
+                reverse,
                 bbox,
                 attributes,
-            });
-        }
-        if direction <= 0 {
-            let (u, v) = (refs[end], refs[start]);
-            attributes[17..21].copy_from_slice(&backward_speed.to_le_bytes());
-            out.edges.push(PreparedEdge {
-                u,
-                v,
-                points: points.clone(),
-                reverse: true,
-                bbox,
-                attributes,
+                barrier: (!barriers.is_empty()).then(|| barriers.join(";")),
+                barrier_at_v: arrival
+                    .and_then(|node| node.barrier)
+                    .map(|code| barrier_name(code).to_owned()),
             });
         }
         start = end;
@@ -455,11 +553,11 @@ fn prepare_way(way: Way<'_>, nodes: &DiskIndex, out: &mut Prepared) -> Result<()
     Ok(())
 }
 
-fn prepare_block(block: PrimitiveBlock, nodes: &DiskIndex) -> Result<Prepared> {
+fn prepare_block(block: PrimitiveBlock, lookups: &Lookups<'_>) -> Result<Prepared> {
     let mut prepared = Prepared::default();
     for group in block.groups() {
         for way in group.ways() {
-            prepare_way(way, nodes, &mut prepared)?;
+            prepare_way(way, lookups, &mut prepared)?;
         }
     }
     Ok(prepared)
@@ -485,12 +583,19 @@ pub fn run(config: Config) -> Result<String> {
     let phase = Instant::now();
     log("Pass 1/2: building disk-backed node locations and junction incidence (Rust)");
     let (source, data, boundary) = layout(&config)?;
-    let (way_blocks, ways, sort_runs) = topology(&config, &pool, &data, boundary)?;
+    let (way_blocks, ways, sort_runs, barriers) = topology(&config, &pool, &data, boundary)?;
     let topology_seconds = phase.elapsed().as_secs_f64();
     let phase = Instant::now();
     log("Pass 2/2: splitting ways and spooling directed edges (Rust)");
     let locations_path = config.scratch.join("locations.idx");
+    let node_tags_path = config.scratch.join("node_tags.idx");
     let nodes = DiskIndex::open(&locations_path, 24)?;
+    let node_tags = DiskIndex::open(&node_tags_path, NodeTags::RECORD_BYTES)?;
+    let lookups = Lookups {
+        nodes: &nodes,
+        node_tags: &node_tags,
+        barriers: &barriers,
+    };
     let db = database(&config.scratch.join("output.sqlite"), config.cache_mb)?;
     let mut dictionaries = Dictionaries::new(&db)?;
     let mut spools = Spools::new(&config.scratch, config.degrees, config.spool_mb << 20)?;
@@ -499,7 +604,7 @@ pub fn run(config: Config) -> Result<String> {
         &config,
         &pool,
         &way_blocks,
-        |_, block| prepare_block(block, &nodes),
+        |_, block| prepare_block(block, &lookups),
         |prepared| {
             for way in &prepared.ways {
                 let mut codes = [0; STRINGS.len()];
@@ -508,6 +613,9 @@ pub fn run(config: Config) -> Result<String> {
                 }
                 for edge in &prepared.edges[way.edges.clone()] {
                     let mut attributes = edge.attributes;
+                    codes[WAY_STRINGS] = dictionaries.code(WAY_STRINGS, edge.barrier.as_deref())?;
+                    codes[WAY_STRINGS + 1] =
+                        dictionaries.code(WAY_STRINGS + 1, edge.barrier_at_v.as_deref())?;
                     for (slot, code) in STRING_SLOTS.iter().zip(codes) {
                         attributes[*slot..slot + 4].copy_from_slice(&code.to_le_bytes());
                     }
@@ -527,8 +635,9 @@ pub fn run(config: Config) -> Result<String> {
     )?;
     spools.close()?;
     db.execute_batch("COMMIT")?;
-    drop(nodes);
+    drop((nodes, node_tags));
     fs::remove_file(locations_path)?;
+    fs::remove_file(node_tags_path)?;
     let edges_seconds = phase.elapsed().as_secs_f64();
     let phase = Instant::now();
     log("Writing memory-mappable columns and manifest (Rust)");

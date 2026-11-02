@@ -34,10 +34,13 @@ def test_real_monaco_against_independent_parser(tmp_path):
         def __init__(self):
             super().__init__()
             self.nodes = {}
+            self.barriers = {}
             self.ways = []
 
         def node(self, node):
             self.nodes[node.id] = (round(node.lon * 1e7), round(node.lat * 1e7))
+            if "barrier" in node.tags:
+                self.barriers[node.id] = node.tags["barrier"]
 
         def way(self, way):
             if way.tags.get("highway") in DRIVABLE:
@@ -69,6 +72,7 @@ def test_real_monaco_against_independent_parser(tmp_path):
                 continue
             for step in directions:
                 nodes = refs[start : end + 1][::step]
+                interior = [source.barriers[n] for n in nodes[1:-1] if n in source.barriers]
                 expected[
                     (
                         way_id,
@@ -76,6 +80,8 @@ def test_real_monaco_against_independent_parser(tmp_path):
                         nodes[-1],
                         tags["highway"],
                         tuple(source.nodes[node] for node in nodes),
+                        ";".join(interior) if interior else None,
+                        source.barriers.get(nodes[-1]),
                     )
                 ] += 1
             start = end
@@ -100,9 +106,12 @@ def test_real_monaco_against_independent_parser(tmp_path):
                     int(tile["v"][i]),
                     result["highway_enum"][int(tile["highway"][i])],
                     integer_coords,
+                    result["dictionaries"]["barrier"][int(tile["barrier"][i])],
+                    result["dictionaries"]["barrier_at_v"][int(tile["barrier_at_v"][i])],
                 )
             ] += 1
     assert actual == expected
+    assert source.barriers  # Otherwise the comparison proves nothing about barriers.
     assert stats["implementation"] == "rust"
     assert stats["edges"] == 2354
     assert stats["source"]["timestamp"] == "2026-11-01T21:21:36Z"

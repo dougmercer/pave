@@ -500,3 +500,94 @@ def test_reversed_oneway_takes_the_backward_limit(pbf, tmp_path):
     data = read_bbox(out, -180, -90, 180, 90)
     assert (int(data["u"][0]), int(data["v"][0])) == (2, 1)
     assert data["maxspeed_kmh"][0] == 30
+
+
+def text(data, column, index):
+    return data["dictionaries"][column][int(data[column][index])]
+
+
+def test_barrier_on_a_shape_point_blocks_both_directions_without_splitting(pbf, tmp_path):
+    nodes = {1: (0.01, 0), 2: (0.02, 0), 3: (0.03, 0)}
+    path = pbf(nodes, [(1, [1, 2, 3], {"highway": "road"})], node_tags={2: {"barrier": "bollard"}})
+    out = tmp_path / "roads"
+    preprocess(path, out)
+    data = read_bbox(out, -180, -90, 180, 90)
+    assert {(int(u), int(v)) for u, v in zip(data["u"], data["v"], strict=True)} == {
+        (1, 3),
+        (3, 1),
+    }
+    assert text(data, "barrier", 0) == text(data, "barrier", 1) == "bollard"
+    assert (data["barrier_at_v"] == -1).all()
+
+
+def test_barriers_on_one_edge_join_in_travel_order(pbf, tmp_path):
+    nodes = {i: (i * 0.01, 0) for i in range(1, 5)}
+    tags = {2: {"barrier": "gate"}, 3: {"barrier": "bollard"}}
+    out = tmp_path / "roads"
+    preprocess(pbf(nodes, [(1, [1, 2, 3, 4], {"highway": "road"})], node_tags=tags), out)
+    data = read_bbox(out, -180, -90, 180, 90)
+    assert text(data, "barrier", directed(data, 1, 4)) == "gate;bollard"
+    assert text(data, "barrier", directed(data, 4, 1)) == "bollard;gate"
+
+
+def test_barrier_at_a_junction_marks_only_edges_arriving_there(pbf, tmp_path):
+    nodes = {1: (0.01, 0), 2: (0.02, 0), 3: (0.03, 0)}
+    ways = [(1, [1, 2], {"highway": "road"}), (2, [2, 3], {"highway": "road"})]
+    out = tmp_path / "roads"
+    preprocess(pbf(nodes, ways, node_tags={2: {"barrier": "gate"}}), out)
+    data = read_bbox(out, -180, -90, 180, 90)
+    assert text(data, "barrier_at_v", directed(data, 1, 2)) == "gate"
+    assert text(data, "barrier_at_v", directed(data, 3, 2)) == "gate"
+    assert text(data, "barrier_at_v", directed(data, 2, 1)) is None
+    assert text(data, "barrier_at_v", directed(data, 2, 3)) is None
+    assert (data["barrier"] == -1).all()
+
+
+def test_node_tags_off_the_road_network_are_ignored(pbf, tmp_path):
+    nodes = {1: (0.01, 0), 2: (0.02, 0), 3: (0.03, 0), 4: (0.04, 0)}
+    ways = [(1, [1, 2], {"highway": "road"}), (2, [3, 4], {"highway": "footway"})]
+    tags = {3: {"barrier": "gate", "maxheight": "2"}, 4: {"barrier": "stile"}}
+    out = tmp_path / "roads"
+    preprocess(pbf(nodes, ways, node_tags=tags), out)
+    data = read_bbox(out, -180, -90, 180, 90)
+    assert len(data["dictionaries"]["barrier"]) == 0
+    assert np.isnan(data["maxheight_m"]).all()
+
+
+@pytest.mark.parametrize(
+    "way,node,expected",
+    [
+        ({}, {"maxheight": "3"}, 3),
+        ({"maxheight": "4"}, {"maxheight": "3"}, 3),
+        ({"maxheight": "3"}, {"maxheight": "4"}, 3),
+        ({"maxheight": "3"}, {"maxheight": "default"}, 3),
+    ],
+)
+def test_limits_on_a_node_tighten_edges_through_it(pbf, tmp_path, way, node, expected):
+    nodes = {1: (0.01, 0), 2: (0.02, 0), 3: (0.03, 0)}
+    path = pbf(nodes, [(1, [1, 2, 3], {"highway": "road", **way})], node_tags={2: node})
+    out = tmp_path / "roads"
+    preprocess(path, out)
+    data = read_bbox(out, -180, -90, 180, 90)
+    np.testing.assert_allclose(data["maxheight_m"], expected)
+
+
+def test_weight_and_width_on_a_node_tighten_their_own_columns(pbf, tmp_path):
+    nodes = {1: (0.01, 0), 2: (0.02, 0), 3: (0.03, 0)}
+    tags = {2: {"maxweight": "7.5", "maxwidth": "2"}}
+    out = tmp_path / "roads"
+    preprocess(pbf(nodes, [(1, [1, 2, 3], {"highway": "road"})], node_tags=tags), out)
+    data = read_bbox(out, -180, -90, 180, 90)
+    np.testing.assert_allclose(data["maxweight_t"], 7.5)
+    np.testing.assert_allclose(data["maxwidth_m"], 2)
+    assert np.isnan(data["maxheight_m"]).all()
+
+
+def test_limit_at_a_junction_applies_only_to_edges_arriving_there(pbf, tmp_path):
+    nodes = {1: (0.01, 0), 2: (0.02, 0), 3: (0.03, 0)}
+    ways = [(1, [1, 2], {"highway": "road"}), (2, [2, 3], {"highway": "road"})]
+    out = tmp_path / "roads"
+    preprocess(pbf(nodes, ways, node_tags={2: {"maxheight": "3"}}), out)
+    data = read_bbox(out, -180, -90, 180, 90)
+    assert data["maxheight_m"][directed(data, 1, 2)] == 3
+    assert np.isnan(data["maxheight_m"][directed(data, 2, 1)])

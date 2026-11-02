@@ -21,7 +21,16 @@ HIGHWAYS = (
     "living_street",
 )
 HIGHWAY_CODES = {value: code for code, value in enumerate(HIGHWAYS)}
-STRINGS = ("access", "motor_vehicle", "hgv", "surface", "name", "vehicle")
+STRINGS = (
+    "access",
+    "motor_vehicle",
+    "hgv",
+    "surface",
+    "name",
+    "vehicle",
+    "barrier",
+    "barrier_at_v",
+)
 NUMBERS = ("maxspeed_kmh", "maxweight_t", "maxheight_m", "maxwidth_m", "maxlength_m", "length_m")
 FLAGS = {"bridge": 1, "tunnel": 2, "bridge_present": 4, "tunnel_present": 8}
 COLUMNS = {

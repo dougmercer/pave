@@ -8,6 +8,11 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
+/// Index keys hold a node ID above these flag bits, so they sort by ID.
+pub const KEY_BITS: u32 = 2;
+const JUNCTION: i64 = 1;
+pub const TAGGED: i64 = 2;
+
 pub fn database(path: &Path, cache_mb: usize) -> Result<Connection> {
     let db = Connection::open(path)?;
     db.execute_batch(&format!(
@@ -53,7 +58,7 @@ impl DiskIndex {
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             let start = mid * self.stride;
-            let key = i64::from_le_bytes(data[start..start + 8].try_into().unwrap()) >> 1;
+            let key = i64::from_le_bytes(data[start..start + 8].try_into().unwrap()) >> KEY_BITS;
             match key.cmp(&id) {
                 std::cmp::Ordering::Less => lo = mid + 1,
                 std::cmp::Ordering::Greater => hi = mid,
@@ -63,16 +68,27 @@ impl DiskIndex {
         None
     }
 
-    /// Location and junction bit, read from a single record.
-    pub fn location(&self, id: i64) -> Option<([f64; 2], bool)> {
+    /// Location and flags, read from a single record.
+    pub fn location(&self, id: i64) -> Option<Location> {
         let record = self.find(id)?;
-        Some((
-            [
+        Some(Location {
+            point: [
                 f64::from_le_bytes(record[8..16].try_into().unwrap()),
                 f64::from_le_bytes(record[16..24].try_into().unwrap()),
             ],
-            record[0] & 1 == 1,
-        ))
+            junction: i64::from(record[0]) & JUNCTION != 0,
+            tagged: i64::from(record[0]) & TAGGED != 0,
+        })
+    }
+
+    pub fn node_tags(&self, id: i64) -> Option<NodeTags> {
+        let record = self.find(id)?;
+        let float = |start: usize| f32::from_le_bytes(record[start..start + 4].try_into().unwrap());
+        let barrier = u32::from_le_bytes(record[8..12].try_into().unwrap());
+        Some(NodeTags {
+            barrier: (barrier != u32::MAX).then_some(barrier),
+            limits: [float(12), float(16), float(20)],
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -89,7 +105,7 @@ impl DiskIndex {
         let (mut lo, mut hi) = (0, self.len());
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            if self.key(mid) >> 1 < id {
+            if self.key(mid) >> KEY_BITS < id {
                 lo = mid + 1;
             } else {
                 hi = mid;
@@ -99,7 +115,34 @@ impl DiskIndex {
     }
 }
 
-/// External sort of `(id << 1) | endpoint`, one entry per way using the node.
+pub struct Location {
+    pub point: [f64; 2],
+    pub junction: bool,
+    pub tagged: bool,
+}
+
+/// What a node's own tags add to the edges using it. Limits are height, weight, width.
+#[derive(Clone, Copy)]
+pub struct NodeTags {
+    pub barrier: Option<u32>,
+    pub limits: [f32; 3],
+}
+
+impl NodeTags {
+    pub const RECORD_BYTES: usize = 24;
+
+    pub fn record(&self, key: i64) -> [u8; Self::RECORD_BYTES] {
+        let mut record = [0u8; Self::RECORD_BYTES];
+        record[..8].copy_from_slice(&key.to_le_bytes());
+        record[8..12].copy_from_slice(&self.barrier.unwrap_or(u32::MAX).to_le_bytes());
+        for (i, limit) in self.limits.iter().enumerate() {
+            record[12 + i * 4..16 + i * 4].copy_from_slice(&limit.to_le_bytes());
+        }
+        record
+    }
+}
+
+/// External sort of `(id << KEY_BITS) | endpoint`, one entry per way using the node.
 pub struct RefSorter {
     scratch: PathBuf,
     buffer: Vec<i64>,
@@ -143,7 +186,7 @@ impl RefSorter {
         Ok(())
     }
 
-    /// Merge runs into sorted unique `(id << 1) | junction` keys for every referenced node.
+    /// Merge runs into sorted unique keys for every referenced node, flagging junctions.
     /// Returns the number of sorted runs, which shows whether `sort_mb` was exceeded.
     pub fn export_used(mut self, path: &Path, pool: &rayon::ThreadPool) -> Result<usize> {
         if !self.buffer.is_empty() {
@@ -165,23 +208,23 @@ impl RefSorter {
         let mut current = None;
         let (mut uses, mut endpoint) = (0u64, false);
         while let Some(Reverse((value, i))) = heap.pop() {
-            let id = value >> 1;
+            let id = value >> KEY_BITS;
             if current != Some(id) {
                 if let Some(id) = current {
-                    let key = (id << 1) | i64::from(uses >= 2 || endpoint);
+                    let key = (id << KEY_BITS) | i64::from(uses >= 2 || endpoint);
                     out.write_all(&key.to_le_bytes())?;
                 }
                 current = Some(id);
                 (uses, endpoint) = (0, false);
             }
             uses += 1;
-            endpoint |= value & 1 == 1;
+            endpoint |= value & JUNCTION != 0;
             if let Some(next) = read_i64(&mut runs[i])? {
                 heap.push(Reverse((next, i)));
             }
         }
         if let Some(id) = current {
-            let key = (id << 1) | i64::from(uses >= 2 || endpoint);
+            let key = (id << KEY_BITS) | i64::from(uses >= 2 || endpoint);
             out.write_all(&key.to_le_bytes())?;
         }
         out.flush()?;
