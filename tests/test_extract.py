@@ -198,6 +198,55 @@ def test_missing_nodes_are_fatal_and_output_is_atomic(pbf, tmp_path):
     assert not list(tmp_path.glob(".osm-road-output-*"))
 
 
+@pytest.mark.parametrize("missing", [3, 6, 10])
+def test_missing_nodes_are_named_wherever_they_fall_among_the_ids(pbf, tmp_path, missing):
+    path = pbf({5: (0, 0), 7: (0.01, 0), 9: (0.02, 0)}, [(1, [5, missing, 9], {"highway": "road"})])
+    with pytest.raises(ValueError, match=f"way 1 references missing node {missing}"):
+        preprocess(path, tmp_path / "roads")
+
+
+def test_missing_node_on_a_one_node_way_leaves_other_coordinates_alone(pbf, tmp_path):
+    nodes = {1: (0.01, 0), 3: (0.03, 0), 5: (0.05, 0)}
+    ways = [(1, [2], {"highway": "road"}), (2, [1, 3, 5], {"highway": "road"})]
+    out = tmp_path / "roads"
+    preprocess(pbf(nodes, ways), out)
+    data = read_bbox(out, -180, -90, 180, 90)
+    assert len(data["u"]) == 2
+    np.testing.assert_allclose(
+        edge_rows(data, 2)[0][2], [nodes[1], nodes[3], nodes[5]], rtol=0, atol=1e-14
+    )
+
+
+@pytest.mark.parametrize(
+    "ids", [(-7, -2, 4), (1, 2**33, 2**33 + 5), (2**40, 2**40 + 4096, 2**40 + 2**33)]
+)
+def test_sparse_and_negative_node_ids(pbf, tmp_path, ids):
+    nodes = {node: (i * 0.01, 0) for i, node in enumerate(ids)}
+    out = tmp_path / "roads"
+    preprocess(pbf(nodes, [(1, list(ids), {"highway": "road"})]), out)
+    data = read_bbox(out, -180, -90, 180, 90)
+    assert set(zip(data["u"].tolist(), data["v"].tolist(), strict=True)) == {
+        (ids[0], ids[-1]),
+        (ids[-1], ids[0]),
+    }
+    np.testing.assert_allclose(
+        edge_rows(data, 1)[0][2], [nodes[node] for node in ids], rtol=0, atol=1e-14
+    )
+
+
+def test_absurdly_wide_node_ids_are_refused(pbf, tmp_path):
+    path = pbf({1: (0, 0), 2**41: (0.01, 0)}, [(1, [1, 2**41], {"highway": "road"})])
+    with pytest.raises(ValueError, match="too wide"):
+        preprocess(path, tmp_path / "roads")
+
+
+def test_invalid_coordinates_are_fatal(pbf, tmp_path):
+    osmium_location = osmium.osm.Location(200, 0)
+    path = pbf({1: (0, 0), 2: osmium_location}, [(1, [1, 2], {"highway": "road"})])
+    with pytest.raises(ValueError, match="invalid WGS84 coordinates at node 2"):
+        preprocess(path, tmp_path / "roads")
+
+
 def test_empty_graph_missing_timestamp_and_ignored_relations(pbf, tmp_path):
     path = pbf(
         {1: (0, 0)},
@@ -367,8 +416,7 @@ def test_cli_uses_the_same_default_tile_size(pbf, tmp_path):
 
 
 def test_small_buffers_spill_without_changing_output(pbf, tmp_path):
-    # 1 MiB holds 131,072 sort keys, so 200,000 references need several sorted runs,
-    # and both directions of 200,000 vertices overflow a 1 MiB tile buffer.
+    # Both directions of 200,000 vertices overflow a 1 MiB tile buffer.
     count = 200_000
     nodes = {i + 1: ((i % 700) * 0.01, (i // 700) * 0.01) for i in range(count)}
     # Shuffled IDs make ways arrive out of spatial order, so tiles are flushed repeatedly.
@@ -378,16 +426,14 @@ def test_small_buffers_spill_without_changing_output(pbf, tmp_path):
         for i in range(len(ids))
     ]
     path = pbf(nodes, ways)
-    small = preprocess(path, tmp_path / "small", sort_mb=1, spool_mb=1)
-    large = preprocess(path, tmp_path / "large", sort_mb=64, spool_mb=64)
-    assert small["buffers"]["sort_runs"] > 1
+    small = preprocess(path, tmp_path / "small", spool_mb=1)
+    large = preprocess(path, tmp_path / "large", spool_mb=64)
     assert small["buffers"]["spool_flushes"] > large["buffers"]["spool_flushes"]
-    assert small["settings"]["sort_mb"] == 1
     assert small["settings"]["spool_mb"] == 1
     assert dataset_files(tmp_path / "small") == dataset_files(tmp_path / "large")
 
 
-@pytest.mark.parametrize("setting", ["sort_mb", "spool_mb", "threads"])
+@pytest.mark.parametrize("setting", ["spool_mb", "threads"])
 def test_buffer_settings_must_be_positive(pbf, tmp_path, setting):
     path = pbf({1: (0, 0), 2: (0.1, 0.1)}, [(1, [1, 2], {"highway": "road"})])
     with pytest.raises(ValueError, match="positive"):
@@ -403,14 +449,11 @@ def test_cli_passes_buffer_settings(pbf, tmp_path):
         str(path),
         str(tmp_path / "roads"),
         "--quiet",
-        "--sort-mb",
-        "3",
         "--spool-mb",
         "5",
     ]
     run = subprocess.run(command, check=True, capture_output=True, text=True)
-    settings = json.loads(run.stdout)["settings"]
-    assert (settings["sort_mb"], settings["spool_mb"]) == (3, 5)
+    assert json.loads(run.stdout)["settings"]["spool_mb"] == 5
 
 
 def test_scratch_defaults_beside_the_output(pbf, tmp_path, monkeypatch):

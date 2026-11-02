@@ -1,106 +1,168 @@
 use anyhow::{Result, ensure};
 use memmap2::Mmap;
 use rayon::prelude::*;
-use std::cmp::Reverse;
-use std::collections::{BinaryHeap, binary_heap::PeekMut};
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write};
-use std::path::{Path, PathBuf};
+use std::io::BufWriter;
+use std::path::Path;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
-/// Index keys hold a node ID above these flag bits, so they sort by ID.
-pub const KEY_BITS: u32 = 2;
-const JUNCTION: i64 = 1;
-pub const TAGGED: i64 = 2;
+/// Node IDs per leaf is `1 << LEAF_BITS`. A small extract's nodes are scattered across the
+/// whole ID space, so leaves must be small for it to allocate little.
+const LEAF_BITS: u32 = 12;
+const LEAF_WORDS: usize = 1 << (LEAF_BITS - 6);
+/// Keeps the table of leaves small enough to allocate; OSM IDs reach about 2^34.
+const MAX_ID_SPAN: u64 = 1 << 40;
+
+pub const LOCATION_BYTES: usize = 16;
+/// A location record holds latitude above these flags. Unwritten records read as zero.
+const FLAG_BITS: u32 = 2;
+const PRESENT: i64 = 1;
+const TAGGED: i64 = 2;
 
 pub fn writer(path: &Path) -> Result<BufWriter<File>> {
     Ok(BufWriter::with_capacity(256 * 1024, File::create(path)?))
 }
 
-/// Immutable sorted fixed-width records backed by a private scratch file.
-pub struct DiskIndex {
-    map: Option<Mmap>,
-    stride: usize,
+/// One location record, from nanodegrees. Clamping keeps a wild latitude out of range
+/// rather than letting the flags overflow it.
+pub fn location_record(lon: i64, lat: i64, tagged: bool) -> [u8; LOCATION_BYTES] {
+    let lat =
+        (lat.clamp(-1 << 60, 1 << 60) << FLAG_BITS) | PRESENT | if tagged { TAGGED } else { 0 };
+    let mut record = [0u8; LOCATION_BYTES];
+    record[..8].copy_from_slice(&lon.to_le_bytes());
+    record[8..].copy_from_slice(&lat.to_le_bytes());
+    record
 }
 
-impl DiskIndex {
-    pub fn open(path: &Path, stride: usize) -> Result<Self> {
-        let file = File::open(path)?;
-        let size = file.metadata()?.len();
+struct Leaf {
+    used: [AtomicU64; LEAF_WORDS],
+    junction: [AtomicU64; LEAF_WORDS],
+}
+
+impl Leaf {
+    /// Used nodes in the words before `word`.
+    fn used_before(&self, word: usize) -> u64 {
+        let words = self.used[..word].iter();
+        words
+            .map(|word| u64::from(word.load(Relaxed).count_ones()))
+            .sum()
+    }
+}
+
+impl Default for Leaf {
+    fn default() -> Self {
+        Self {
+            used: std::array::from_fn(|_| AtomicU64::new(0)),
+            junction: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+}
+
+/// One bit per node ID for use by a drivable way and one for being a junction, so ways can
+/// mark nodes from any thread. A node's rank among the used IDs then locates its record.
+pub struct NodeIds {
+    first: i64,
+    span: u64,
+    leaves: Vec<OnceLock<Box<Leaf>>>,
+    /// Used nodes before each leaf, filled in by `count`.
+    ranks: Vec<u64>,
+}
+
+impl NodeIds {
+    pub fn new(first: i64, last: i64) -> Result<Self> {
+        let span = last.abs_diff(first);
         ensure!(
-            size % stride as u64 == 0,
-            "Truncated index: {}",
-            path.display()
+            span < MAX_ID_SPAN,
+            "Node IDs from {first} to {last} span too wide a range"
         );
-        let map = if size == 0 {
+        let leaves = (span >> LEAF_BITS) as usize + 1;
+        Ok(Self {
+            first,
+            span,
+            leaves: (0..leaves).map(|_| OnceLock::new()).collect(),
+            ranks: Vec::new(),
+        })
+    }
+
+    /// Where an ID's bit lives, or None outside the IDs that exist.
+    fn position(&self, id: i64) -> Option<(usize, usize, u64)> {
+        let offset = id.wrapping_sub(self.first) as u64;
+        (offset <= self.span).then(|| {
+            let word = (offset >> 6) as usize & (LEAF_WORDS - 1);
+            ((offset >> LEAF_BITS) as usize, word, 1 << (offset & 63))
+        })
+    }
+
+    /// Record one way's use of a node, which is a junction if another way used it first or
+    /// it ends this one. An ID that does not exist is reported when its way is built.
+    pub fn mark(&self, id: i64, endpoint: bool) {
+        let Some((leaf, word, bit)) = self.position(id) else {
+            return;
+        };
+        let leaf = self.leaves[leaf].get_or_init(Box::default);
+        let seen = leaf.used[word].fetch_or(bit, Relaxed) & bit != 0;
+        if seen || endpoint {
+            leaf.junction[word].fetch_or(bit, Relaxed);
+        }
+    }
+
+    /// Finish marking, returning how many nodes are used.
+    pub fn count(&mut self, pool: &rayon::ThreadPool) -> usize {
+        let count =
+            |leaf: &OnceLock<Box<Leaf>>| leaf.get().map_or(0, |leaf| leaf.used_before(LEAF_WORDS));
+        self.ranks = pool.install(|| self.leaves.par_iter().map(count).collect());
+        let mut total = 0;
+        for rank in &mut self.ranks {
+            total += std::mem::replace(rank, total);
+        }
+        total as usize
+    }
+
+    /// A used node's position in ID order and whether it is a junction.
+    pub fn rank(&self, id: i64) -> Option<(usize, bool)> {
+        let (index, word, bit) = self.position(id)?;
+        let leaf = self.leaves[index].get()?;
+        let used = leaf.used[word].load(Relaxed);
+        if used & bit == 0 {
+            return None;
+        }
+        let before = leaf.used_before(word) + u64::from((used & (bit - 1)).count_ones());
+        let junction = leaf.junction[word].load(Relaxed) & bit != 0;
+        Some(((self.ranks[index] + before) as usize, junction))
+    }
+}
+
+/// Node coordinates by rank, in a private scratch file.
+pub struct NodeIndex {
+    ids: NodeIds,
+    map: Option<Mmap>,
+}
+
+impl NodeIndex {
+    pub fn open(ids: NodeIds, path: &Path) -> Result<Self> {
+        let file = File::open(path)?;
+        let map = if file.metadata()?.len() == 0 {
             None
         } else {
             // SAFETY: we exclusively own the private scratch directory. Writers have
             // flushed and closed, and no file is mutated/truncated while mapped.
             Some(unsafe { Mmap::map(&file)? })
         };
-        Ok(Self { map, stride })
+        Ok(Self { ids, map })
     }
 
-    fn find(&self, id: i64) -> Option<&[u8]> {
-        let data = self.map.as_ref()?;
-        let (mut lo, mut hi) = (0, data.len() / self.stride);
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-            let start = mid * self.stride;
-            let key = i64::from_le_bytes(data[start..start + 8].try_into().unwrap()) >> KEY_BITS;
-            match key.cmp(&id) {
-                std::cmp::Ordering::Less => lo = mid + 1,
-                std::cmp::Ordering::Greater => hi = mid,
-                std::cmp::Ordering::Equal => return Some(&data[start..start + self.stride]),
-            }
-        }
-        None
-    }
-
-    /// Location and flags, read from a single record.
+    /// Location and flags, or None for a node the extract does not contain.
     pub fn location(&self, id: i64) -> Option<Location> {
-        let record = self.find(id)?;
-        Some(Location {
-            point: [
-                f64::from_le_bytes(record[8..16].try_into().unwrap()),
-                f64::from_le_bytes(record[16..24].try_into().unwrap()),
-            ],
-            junction: i64::from(record[0]) & JUNCTION != 0,
-            tagged: i64::from(record[0]) & TAGGED != 0,
+        let (rank, junction) = self.ids.rank(id)?;
+        let record = &self.map.as_ref()?[rank * LOCATION_BYTES..][..LOCATION_BYTES];
+        let lon = i64::from_le_bytes(record[..8].try_into().unwrap());
+        let lat = i64::from_le_bytes(record[8..].try_into().unwrap());
+        (lat & PRESENT != 0).then(|| Location {
+            point: [lon as f64 / 1e9, (lat >> FLAG_BITS) as f64 / 1e9],
+            junction,
+            tagged: lat & TAGGED != 0,
         })
-    }
-
-    pub fn node_tags(&self, id: i64) -> Option<NodeTags> {
-        let record = self.find(id)?;
-        let float = |start: usize| f32::from_le_bytes(record[start..start + 4].try_into().unwrap());
-        let barrier = u32::from_le_bytes(record[8..12].try_into().unwrap());
-        Some(NodeTags {
-            barrier: (barrier != u32::MAX).then_some(barrier),
-            limits: [float(12), float(16), float(20)],
-        })
-    }
-
-    pub fn len(&self) -> usize {
-        self.map.as_ref().map_or(0, |data| data.len() / self.stride)
-    }
-
-    pub fn key(&self, index: usize) -> i64 {
-        let data = self.map.as_ref().unwrap();
-        let start = index * self.stride;
-        i64::from_le_bytes(data[start..start + 8].try_into().unwrap())
-    }
-
-    pub fn lower_bound(&self, id: i64) -> usize {
-        let (mut lo, mut hi) = (0, self.len());
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-            if self.key(mid) >> KEY_BITS < id {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-        lo
     }
 }
 
@@ -120,9 +182,9 @@ pub struct NodeTags {
 impl NodeTags {
     pub const RECORD_BYTES: usize = 24;
 
-    pub fn record(&self, key: i64) -> [u8; Self::RECORD_BYTES] {
+    pub fn record(&self, id: i64) -> [u8; Self::RECORD_BYTES] {
         let mut record = [0u8; Self::RECORD_BYTES];
-        record[..8].copy_from_slice(&key.to_le_bytes());
+        record[..8].copy_from_slice(&id.to_le_bytes());
         record[8..12].copy_from_slice(&self.barrier.unwrap_or(u32::MAX).to_le_bytes());
         for (i, limit) in self.limits.iter().enumerate() {
             record[12 + i * 4..16 + i * 4].copy_from_slice(&limit.to_le_bytes());
@@ -131,106 +193,52 @@ impl NodeTags {
     }
 }
 
-/// External sort of `(id << KEY_BITS) | endpoint`, one entry per way using the node.
-pub struct RefSorter {
-    scratch: PathBuf,
-    buffer: Vec<i64>,
-    limit: usize,
-    runs: Vec<PathBuf>,
+/// The few nodes with tags that matter, sorted by ID in a private scratch file.
+pub struct NodeTagIndex {
+    map: Option<Mmap>,
 }
 
-impl RefSorter {
-    pub fn new(scratch: &Path, bytes: usize) -> Self {
-        Self {
-            scratch: scratch.to_owned(),
-            buffer: Vec::with_capacity(bytes / 8),
-            limit: bytes / 8,
-            runs: Vec::new(),
-        }
+impl NodeTagIndex {
+    pub fn open(path: &Path) -> Result<Self> {
+        let file = File::open(path)?;
+        let size = file.metadata()?.len();
+        ensure!(
+            size % NodeTags::RECORD_BYTES as u64 == 0,
+            "Truncated index: {}",
+            path.display()
+        );
+        let map = if size == 0 {
+            None
+        } else {
+            // SAFETY: as for `NodeIndex`.
+            Some(unsafe { Mmap::map(&file)? })
+        };
+        Ok(Self { map })
     }
 
-    pub fn extend(&mut self, values: &[i64], pool: &rayon::ThreadPool) -> Result<()> {
-        let mut values = values;
-        while !values.is_empty() {
-            let take = values.len().min(self.limit - self.buffer.len());
-            self.buffer.extend_from_slice(&values[..take]);
-            values = &values[take..];
-            if self.buffer.len() == self.limit {
-                self.spill(pool)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn spill(&mut self, pool: &rayon::ThreadPool) -> Result<()> {
-        pool.install(|| self.buffer.par_sort_unstable());
-        let path = self.scratch.join(format!("refs.{}", self.runs.len()));
-        let mut file = writer(&path)?;
-        for value in &self.buffer {
-            file.write_all(&value.to_le_bytes())?;
-        }
-        file.flush()?;
-        self.runs.push(path);
-        self.buffer.clear();
-        Ok(())
-    }
-
-    /// Merge runs into sorted unique keys for every referenced node, flagging junctions.
-    /// Returns the number of sorted runs, which shows whether `sort_mb` was exceeded.
-    pub fn export_used(mut self, path: &Path, pool: &rayon::ThreadPool) -> Result<usize> {
-        if !self.buffer.is_empty() {
-            self.spill(pool)?;
-        }
-        self.buffer = Vec::new();
-        let mut runs = self
-            .runs
-            .iter()
-            .map(|run| Ok(BufReader::with_capacity(64 * 1024, File::open(run)?)))
-            .collect::<Result<Vec<_>>>()?;
-        let mut heap = BinaryHeap::with_capacity(runs.len());
-        for (i, run) in runs.iter_mut().enumerate() {
-            if let Some(value) = read_i64(run)? {
-                heap.push(Reverse((value, i)));
-            }
-        }
-        let mut out = writer(path)?;
-        let mut current = None;
-        let (mut uses, mut endpoint) = (0u64, false);
-        while let Some(mut top) = heap.peek_mut() {
-            let Reverse((value, i)) = *top;
-            let id = value >> KEY_BITS;
-            if current != Some(id) {
-                if let Some(id) = current {
-                    let key = (id << KEY_BITS) | i64::from(uses >= 2 || endpoint);
-                    out.write_all(&key.to_le_bytes())?;
+    pub fn node_tags(&self, id: i64) -> Option<NodeTags> {
+        let data = self.map.as_ref()?;
+        let stride = NodeTags::RECORD_BYTES;
+        let (mut lo, mut hi) = (0, data.len() / stride);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let record = &data[mid * stride..][..stride];
+            let key = i64::from_le_bytes(record[..8].try_into().unwrap());
+            match key.cmp(&id) {
+                std::cmp::Ordering::Less => lo = mid + 1,
+                std::cmp::Ordering::Greater => hi = mid,
+                std::cmp::Ordering::Equal => {
+                    let float = |start: usize| {
+                        f32::from_le_bytes(record[start..start + 4].try_into().unwrap())
+                    };
+                    let barrier = u32::from_le_bytes(record[8..12].try_into().unwrap());
+                    return Some(NodeTags {
+                        barrier: (barrier != u32::MAX).then_some(barrier),
+                        limits: [float(12), float(16), float(20)],
+                    });
                 }
-                current = Some(id);
-                (uses, endpoint) = (0, false);
-            }
-            uses += 1;
-            endpoint |= value & JUNCTION != 0;
-            match read_i64(&mut runs[i])? {
-                Some(next) => *top = Reverse((next, i)),
-                None => drop(PeekMut::pop(top)),
             }
         }
-        if let Some(id) = current {
-            let key = (id << KEY_BITS) | i64::from(uses >= 2 || endpoint);
-            out.write_all(&key.to_le_bytes())?;
-        }
-        out.flush()?;
-        for run in &self.runs {
-            std::fs::remove_file(run)?;
-        }
-        Ok(self.runs.len())
-    }
-}
-
-fn read_i64(reader: &mut impl Read) -> Result<Option<i64>> {
-    let mut bytes = [0u8; 8];
-    match reader.read_exact(&mut bytes) {
-        Ok(()) => Ok(Some(i64::from_le_bytes(bytes))),
-        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
-        Err(error) => Err(error.into()),
+        None
     }
 }

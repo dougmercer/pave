@@ -29,23 +29,22 @@ Options:
 
 ```sh
 prep input.osm.pbf outdir/ --tile-degrees 0.1 --workdir /fast-disk/scratch \
-    --threads 8 --sort-mb 64 --spool-mb 64
+    --threads 8 --spool-mb 64
 ```
 
 Scratch files go beside the output unless `--workdir` names another disk.
 `--threads` sets the workers that decode and transform PBF blocks and read the
 spool back, and bounds the blocks in flight; one more thread reads the file, the
-calling thread assigns string codes, and one more spools edges. `--sort-mb` limits each in-memory run when sorting
-node references, and `--spool-mb` limits tile output buffered in RAM. Exceeding
-either spills to scratch and never changes the output. The report's `buffers`
-section shows `sort_runs` and `spool_flushes`, which reveal whether a larger setting
-would help. `--quiet` suppresses stderr
+calling thread assigns string codes, and one more spools edges. `--spool-mb` limits
+tile output buffered in RAM. Exceeding it spills to scratch and never changes the
+output. The report's `buffers` section shows `spool_flushes`, which reveals whether a
+larger setting would help. `--quiet` suppresses stderr
 progress. Stdout is a JSON performance report, also saved as `outdir/stats.json`.
 
 Input must be a snapshot with **unique, ascending node IDs and way IDs**, as in
-normal Geofabrik extracts. Files advertising `Sort.Type_then_ID` skip node blocks
-when scanning ways, and are rejected if they are not actually sorted; other files
-work but scan every block twice. History files are rejected. Incomplete references on
+normal Geofabrik extracts, and node IDs must span less than 2^40. Files advertising
+`Sort.Type_then_ID` skip node blocks when scanning ways, and are rejected if they are
+not actually sorted; other files work but scan every block three times. History files are rejected. Incomplete references on
 drivable ways cause a descriptive failure: no partial graph is published.
 Missing references on excluded ways are irrelevant. Output must be absent or
 empty; existing datasets are never overwritten. Scratch files are removed on
@@ -208,34 +207,34 @@ become NaN. The package never computes a speed or a vehicle permission.
 
 ## Memory and temporary disk
 
-Preprocessing makes three passes. The first scans way blocks and externally sorts
-every node reference from a drivable way, producing a sorted list of the nodes
-those ways use, each marked as a junction or a shape point. The second scans node
-blocks and keeps only those nodes in a sorted location file, with the junction bit
-in the same record. Drivable ways reference about 8-16% of an extract's nodes, so
-this index stays far smaller than one covering every node. Barrier and limit tags
-on those nodes go in a second small index. The third scans way blocks again,
-resolves locations through a memory map, and spools directed edges into one log
+Preprocessing makes three passes. The first scans way blocks and marks every node a
+drivable way references in a bitmap of the extract's node ID range, with a second bit
+for junctions. The second scans node blocks and keeps only those nodes in a location
+file, in ID order, where a node's record is found from its rank among the marked IDs.
+Drivable ways reference about 8-16% of an extract's nodes, so this index stays far
+smaller than one covering every node. Barrier and limit tags on those nodes go in a
+second small index. The third scans way blocks again, resolves locations through a
+memory map, and spools directed edges into one log
 with a list of chunks per tile, so tile count adds no scratch files. Decoding and
 per-block work happen on the worker threads, in order. Writing columns reads those
 chunks back concurrently, because the page cache may have evicted the log by then.
 Each spill is written in tile order, so neighbouring tiles' chunks can share a read.
 
-The native process keeps bounded PBF batches, one sort run (`--sort-mb`), and buffered
-tile output (`--spool-mb`). Dictionaries of distinct strings stay in RAM, which grows
+The native process keeps bounded PBF batches and buffered tile output (`--spool-mb`).
+The node bitmap uses 2 bits per ID in the range an extract's nodes span, about 3.3 GiB
+at most for today's IDs, allocated in 4,096-ID leaves only where a road uses a node, plus
+a 16-byte table entry and 8-byte rank per 4,096 IDs of that range. Dictionaries of distinct strings stay in RAM, which grows
 with an extract's road names rather than its geometry. Tile metadata and each tile's
 list of spool chunks stay in RAM too, which scales with the tile count and flushes
 rather than the extract size, as does the small table of distinct barrier values. No complete extract, topology hash map, or tile's complete geometry
 is accumulated in application RAM. Memory-mapped index pages are demand-paged by
 the OS, so observed RSS includes resident file-backed pages.
 
-Budget scratch disk for the sorted runs (8 bytes per reference), used-node list
-(8 bytes per used node), location index (24 bytes per used node, plus 24 per node
+Budget scratch disk for the location index (16 bytes per used node, plus 24 per node
 with a barrier or limit), spool log, and output. The spool log
 uses 16 bytes per directed vertex and 98 bytes per edge. Final edge columns use 98
 bytes per edge plus 16 bytes per directed vertex, dictionaries, and small `.npy`
-headers. Runs, the used-node list, and the location indexes are deleted as soon as
-each pass finishes. The spool log lasts until the columns are written, so peak disk
+headers. The location indexes are deleted as soon as the edges are spooled. The spool log lasts until the columns are written, so peak disk
 use is about twice the size of the output.
 
 ## Tests and benchmarks

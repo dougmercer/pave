@@ -1,4 +1,6 @@
-use crate::index::{DiskIndex, KEY_BITS, NodeTags, RefSorter, TAGGED, writer};
+use crate::index::{
+    LOCATION_BYTES, NodeIds, NodeIndex, NodeTagIndex, NodeTags, location_record, writer,
+};
 use crate::storage::{Attributes, COLUMNS, Dictionaries, STRING_SLOTS, Spools};
 use crate::tags::{self, HIGHWAYS, STRINGS, Tags, WAY_STRINGS};
 use anyhow::{Context, Result, ensure};
@@ -6,9 +8,10 @@ use chrono::{DateTime, SecondsFormat};
 use osmpbf::{BlobReader, BlobType, ByteOffset, Element, HeaderBlock, PrimitiveBlock, Way};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, File};
 use std::io::Write;
 use std::ops::Range;
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, sync_channel};
 use std::time::Instant;
@@ -22,8 +25,6 @@ pub struct Config {
     pub output: PathBuf,
     pub scratch: PathBuf,
     pub degrees: f64,
-    /// In-memory run size for the external sort of node references.
-    pub sort_mb: usize,
     /// Edge rows and vertices buffered across all tiles before spilling to scratch.
     pub spool_mb: usize,
     pub threads: usize,
@@ -148,15 +149,13 @@ fn source_header(header: &HeaderBlock, path: &Path) -> Result<Value> {
 
 struct WayScan {
     offset: u64,
-    keys: Vec<i64>,
     ways: u64,
     range: Option<(i64, i64)>,
 }
 
-fn scan_ways(offset: u64, block: PrimitiveBlock) -> Result<WayScan> {
+fn scan_ways(offset: u64, block: PrimitiveBlock, ids: &NodeIds) -> Result<WayScan> {
     let mut scan = WayScan {
         offset,
-        keys: Vec::new(),
         ways: 0,
         range: None,
     };
@@ -186,10 +185,9 @@ fn scan_ways(offset: u64, block: PrimitiveBlock) -> Result<WayScan> {
             let last = *refs.last().unwrap();
             refs.sort_unstable();
             refs.dedup(); // Distinct ways, not repeated occurrences within a way.
-            scan.keys.extend(
-                refs.iter()
-                    .map(|&id| (id << KEY_BITS) | i64::from(id == first || id == last)),
-            );
+            for &id in &refs {
+                ids.mark(id, id == first || id == last);
+            }
         }
     }
     Ok(scan)
@@ -197,10 +195,10 @@ fn scan_ways(offset: u64, block: PrimitiveBlock) -> Result<WayScan> {
 
 #[derive(Default)]
 struct NodeScan {
-    records: Vec<u8>,
+    /// Location records in runs, each with its byte offset in the location file.
+    runs: Vec<(usize, Vec<u8>)>,
     tagged: Vec<(i64, Option<String>, [f32; 3])>,
     range: Option<(i64, i64)>,
-    position: usize,
 }
 
 /// The barrier and limits on a node, if it has any.
@@ -223,53 +221,50 @@ fn read_node_tags<'a>(
 impl NodeScan {
     fn visit<'a>(
         &mut self,
-        used: &DiskIndex,
+        ids: &NodeIds,
         id: i64,
         lon: i64,
         lat: i64,
         node_tags: impl Iterator<Item = (&'a str, &'a str)>,
     ) -> Result<()> {
         self.range = match self.range {
-            None => {
-                self.position = used.lower_bound(id);
-                Some((id, id))
-            }
+            None => Some((id, id)),
             Some((first, last)) => {
                 ensure!(id > last, UNSORTED_NODES);
                 Some((first, id))
             }
         };
-        while self.position < used.len() && used.key(self.position) >> KEY_BITS < id {
-            self.position += 1;
+        let Some((rank, _)) = ids.rank(id) else {
+            return Ok(());
+        };
+        let found = read_node_tags(node_tags);
+        let record = location_record(lon, lat, found.is_some());
+        if let Some((barrier, limits)) = found {
+            self.tagged.push((id, barrier, limits));
         }
-        if self.position < used.len() && used.key(self.position) >> KEY_BITS == id {
-            let mut key = used.key(self.position);
-            if let Some((barrier, limits)) = read_node_tags(node_tags) {
-                key |= TAGGED;
-                self.tagged.push((key, barrier, limits));
+        // Only a missing node can break a run, because IDs ascend.
+        let start = rank * LOCATION_BYTES;
+        match self.runs.last_mut() {
+            Some((offset, bytes)) if *offset + bytes.len() == start => {
+                bytes.extend_from_slice(&record)
             }
-            self.records.extend_from_slice(&key.to_le_bytes());
-            self.records
-                .extend_from_slice(&(lon as f64 / 1e9).to_le_bytes());
-            self.records
-                .extend_from_slice(&(lat as f64 / 1e9).to_le_bytes());
-            self.position += 1;
+            _ => self.runs.push((start, record.to_vec())),
         }
         Ok(())
     }
 }
 
-fn scan_nodes(block: PrimitiveBlock, used: &DiskIndex, nodes_only: bool) -> Result<NodeScan> {
+fn scan_nodes(block: PrimitiveBlock, ids: &NodeIds, nodes_only: bool) -> Result<NodeScan> {
     let mut scan = NodeScan::default();
     for element in block.elements() {
         match element {
             Element::Node(node) => {
                 let (id, lon, lat) = (node.id(), node.nano_lon(), node.nano_lat());
-                scan.visit(used, id, lon, lat, node.tags())?
+                scan.visit(ids, id, lon, lat, node.tags())?
             }
             Element::DenseNode(node) => {
                 let (id, lon, lat) = (node.id(), node.nano_lon(), node.nano_lat());
-                scan.visit(used, id, lon, lat, node.tags())?
+                scan.visit(ids, id, lon, lat, node.tags())?
             }
             // A file that lies about its sort order must not silently lose ways.
             Element::Way(_) | Element::Relation(_) => ensure!(!nodes_only, UNSORTED_FILE),
@@ -278,27 +273,72 @@ fn scan_nodes(block: PrimitiveBlock, used: &DiskIndex, nodes_only: bool) -> Resu
     Ok(scan)
 }
 
+/// The lowest and highest node IDs. Sorted files keep them in the blocks at each end of
+/// their nodes; other files can have them anywhere.
+fn node_id_range(
+    config: &Config,
+    pool: &rayon::ThreadPool,
+    data: &[u64],
+    boundary: usize,
+) -> Result<Option<(i64, i64)>> {
+    let blocks: Vec<u64> = if boundary == 0 {
+        data.to_vec()
+    } else {
+        let ends = [0, boundary - 1, boundary];
+        ends.iter().filter_map(|&i| data.get(i).copied()).collect()
+    };
+    let mut range: Option<(i64, i64)> = None;
+    pipeline(
+        config,
+        pool,
+        &blocks,
+        |_, block| {
+            let ids = block.elements().filter_map(|element| match element {
+                Element::Node(node) => Some(node.id()),
+                Element::DenseNode(node) => Some(node.id()),
+                Element::Way(_) | Element::Relation(_) => None,
+            });
+            Ok(ids.fold(None, |range: Option<(i64, i64)>, id| {
+                Some(range.map_or((id, id), |(low, high)| (low.min(id), high.max(id))))
+            }))
+        },
+        |found| {
+            if let Some((low, high)) = found {
+                range = Some(range.map_or((low, high), |(a, b)| (a.min(low), b.max(high))));
+            }
+            Ok(())
+        },
+    )?;
+    Ok(range)
+}
+
 fn topology(
     config: &Config,
     pool: &rayon::ThreadPool,
     data: &[u64],
     boundary: usize,
-) -> Result<(Vec<u64>, u64, usize, Vec<String>)> {
-    let mut sorter = RefSorter::new(&config.scratch, config.sort_mb << 20);
+) -> Result<(Vec<u64>, u64, NodeIds, Vec<String>)> {
+    let (first, last) = node_id_range(config, pool, data, boundary)?.unwrap_or((0, 0));
+    let mut ids = NodeIds::new(first, last)?;
     let (mut way_blocks, mut ways, mut last_way) = (Vec::new(), 0, None);
-    pipeline(config, pool, &data[boundary..], scan_ways, |scan| {
-        if let Some((first, last)) = scan.range {
-            ensure!(last_way.is_none_or(|id| first > id), UNSORTED_WAYS);
-            last_way = Some(last);
-            way_blocks.push(scan.offset);
-        }
-        ways += scan.ways;
-        sorter.extend(&scan.keys, pool)
-    })?;
-    let used_path = config.scratch.join("used.idx");
-    let sort_runs = sorter.export_used(&used_path, pool)?;
-    let used = DiskIndex::open(&used_path, 8)?;
-    let mut locations = writer(&config.scratch.join("locations.idx"))?;
+    pipeline(
+        config,
+        pool,
+        &data[boundary..],
+        |offset, block| scan_ways(offset, block, &ids),
+        |scan| {
+            if let Some((first, last)) = scan.range {
+                ensure!(last_way.is_none_or(|id| first > id), UNSORTED_WAYS);
+                last_way = Some(last);
+                way_blocks.push(scan.offset);
+            }
+            ways += scan.ways;
+            Ok(())
+        },
+    )?;
+    let used = ids.count(pool);
+    let locations = File::create(config.scratch.join("locations.idx"))?;
+    locations.set_len((used * LOCATION_BYTES) as u64)?;
     let mut node_tags = writer(&config.scratch.join("node_tags.idx"))?;
     // Distinct barrier values are few, so workers can share them as a table in RAM.
     let (mut barriers, mut barrier_codes) = (Vec::new(), HashMap::new());
@@ -314,31 +354,30 @@ fn topology(
         &data[..node_end],
         |offset, block| {
             let nodes_only = boundary > 0 && data.get(boundary).is_none_or(|&end| offset < end);
-            scan_nodes(block, &used, nodes_only)
+            scan_nodes(block, &ids, nodes_only)
         },
         |scan| {
             if let Some((first, last)) = scan.range {
                 ensure!(last_node.is_none_or(|id| first > id), UNSORTED_NODES);
                 last_node = Some(last);
             }
-            locations.write_all(&scan.records)?;
-            for (key, barrier, limits) in scan.tagged {
+            for (offset, bytes) in &scan.runs {
+                locations.write_all_at(bytes, *offset as u64)?;
+            }
+            for (id, barrier, limits) in scan.tagged {
                 let barrier = barrier.map(|value| {
                     *barrier_codes.entry(value.clone()).or_insert_with(|| {
                         barriers.push(value);
                         barriers.len() as u32 - 1
                     })
                 });
-                node_tags.write_all(&NodeTags { barrier, limits }.record(key))?;
+                node_tags.write_all(&NodeTags { barrier, limits }.record(id))?;
             }
             Ok(())
         },
     )?;
-    locations.flush()?;
     node_tags.flush()?;
-    drop(used);
-    fs::remove_file(used_path)?;
-    Ok((way_blocks, ways, sort_runs, barriers))
+    Ok((way_blocks, ways, ids, barriers))
 }
 
 struct PreparedEdge {
@@ -359,8 +398,8 @@ struct PreparedWay {
 
 /// Read-only indexes the workers share while building edges.
 struct Lookups<'a> {
-    nodes: &'a DiskIndex,
-    node_tags: &'a DiskIndex,
+    nodes: &'a NodeIndex,
+    node_tags: &'a NodeTagIndex,
     barriers: &'a [String],
 }
 
@@ -562,8 +601,8 @@ pub fn run(config: Config) -> Result<String> {
         "tile_degrees must be finite and in (0, 180]"
     );
     ensure!(
-        config.threads > 0 && config.sort_mb > 0 && config.spool_mb > 0,
-        "threads, sort_mb and spool_mb must be positive"
+        config.threads > 0 && config.spool_mb > 0,
+        "threads and spool_mb must be positive"
     );
     let log = |message| {
         if !config.quiet {
@@ -576,14 +615,14 @@ pub fn run(config: Config) -> Result<String> {
     let phase = Instant::now();
     log("Pass 1/2: building disk-backed node locations and junction incidence (Rust)");
     let (source, data, boundary) = layout(&config)?;
-    let (way_blocks, ways, sort_runs, barriers) = topology(&config, &pool, &data, boundary)?;
+    let (way_blocks, ways, ids, barriers) = topology(&config, &pool, &data, boundary)?;
     let topology_seconds = phase.elapsed().as_secs_f64();
     let phase = Instant::now();
     log("Pass 2/2: splitting ways and spooling directed edges (Rust)");
     let locations_path = config.scratch.join("locations.idx");
     let node_tags_path = config.scratch.join("node_tags.idx");
-    let nodes = DiskIndex::open(&locations_path, 24)?;
-    let node_tags = DiskIndex::open(&node_tags_path, NodeTags::RECORD_BYTES)?;
+    let nodes = NodeIndex::open(ids, &locations_path)?;
+    let node_tags = NodeTagIndex::open(&node_tags_path)?;
     let lookups = Lookups {
         nodes: &nodes,
         node_tags: &node_tags,
@@ -675,9 +714,9 @@ pub fn run(config: Config) -> Result<String> {
         "edges": spools.edges, "vertices": spools.vertices, "tiles": tiles, "drivable_ways": ways,
         "stages": {"topology_seconds": topology_seconds, "edges_seconds": edges_seconds,
                    "columns_seconds": phase.elapsed().as_secs_f64()}, "source": source,
-        "settings": {"tile_degrees": config.degrees, "sort_mb": config.sort_mb,
-                     "spool_mb": config.spool_mb, "threads": config.threads},
-        "buffers": {"sort_runs": sort_runs, "spool_flushes": spools.flushes},
+        "settings": {"tile_degrees": config.degrees, "spool_mb": config.spool_mb,
+                     "threads": config.threads},
+        "buffers": {"spool_flushes": spools.flushes},
         "implementation": "rust",
     }))?)
 }
