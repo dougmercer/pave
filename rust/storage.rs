@@ -1,15 +1,12 @@
 use crate::index::writer;
 use crate::tags::STRINGS;
 use anyhow::{Result, ensure};
-use lru::LruCache;
 use rayon::prelude::*;
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
-use std::num::NonZeroUsize;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
@@ -60,76 +57,39 @@ pub fn npy(path: &Path, dtype: &str, shape: &[u64]) -> Result<BufWriter<File>> {
     Ok(file)
 }
 
-pub struct Dictionaries<'a> {
-    db: &'a Connection,
-    cache: LruCache<(usize, String), i32>,
-    counts: [i64; STRINGS.len()],
+/// Distinct strings per field, coded in first-seen order. They grow with the road names
+/// in an extract, far more slowly than its geometry, so they stay in RAM.
+#[derive(Default)]
+pub struct Dictionaries {
+    codes: [HashMap<Box<str>, i32>; STRINGS.len()],
 }
 
-impl<'a> Dictionaries<'a> {
-    pub fn new(db: &'a Connection) -> Result<Self> {
-        db.execute_batch(
-            "CREATE TABLE strings(field INTEGER, code INTEGER, value TEXT,
-                          PRIMARY KEY(field, code), UNIQUE(field, value));",
-        )?;
-        Ok(Self {
-            db,
-            cache: LruCache::new(NonZeroUsize::new(8192).unwrap()),
-            counts: [0; STRINGS.len()],
-        })
-    }
-
+impl Dictionaries {
     pub fn code(&mut self, field: usize, value: Option<&str>) -> Result<i32> {
         let Some(value) = value else { return Ok(-1) };
-        let key = (field, value.to_owned());
-        if let Some(&code) = self.cache.get(&key) {
+        let codes = &mut self.codes[field];
+        if let Some(&code) = codes.get(value) {
             return Ok(code);
         }
-        let existing: Option<i32> = self
-            .db
-            .prepare_cached("SELECT code FROM strings WHERE field=? AND value=?")?
-            .query_row(params![field as i64, value], |r| r.get(0))
-            .optional()?;
-        let code = match existing {
-            Some(code) => code,
-            None => {
-                let code = i32::try_from(self.counts[field])?;
-                self.db
-                    .prepare_cached("INSERT INTO strings VALUES (?,?,?)")?
-                    .execute(params![field as i64, code, value])?;
-                self.counts[field] += 1;
-                code
-            }
-        };
-        self.cache.put(key, code);
+        let code = i32::try_from(codes.len())?;
+        codes.insert(value.into(), code);
         Ok(code)
     }
 
-    pub fn finish(&self, out: &Path) -> Result<Value> {
+    pub fn finish(self, out: &Path) -> Result<Value> {
         fs::create_dir(out.join("dictionaries"))?;
         let mut tables = serde_json::Map::new();
-        for (field, name) in STRINGS.iter().enumerate() {
-            let size: i64 = self.db.query_row(
-                "SELECT coalesce(sum(length(cast(value AS BLOB))),0) FROM strings WHERE field=?",
-                [field as i64],
-                |r| r.get(0),
-            )?;
+        for (name, codes) in STRINGS.iter().zip(&self.codes) {
+            let mut values: Vec<_> = codes.iter().collect();
+            values.sort_unstable_by_key(|(_, code)| **code);
+            let size: usize = values.iter().map(|(value, _)| value.len()).sum();
             let data_path = format!("dictionaries/{name}.data.npy");
             let offsets_path = format!("dictionaries/{name}.offsets.npy");
             let mut data = npy(&out.join(&data_path), "|u1", &[size as u64])?;
-            let mut offsets = npy(
-                &out.join(&offsets_path),
-                "<i8",
-                &[self.counts[field] as u64 + 1],
-            )?;
+            let mut offsets = npy(&out.join(&offsets_path), "<i8", &[values.len() as u64 + 1])?;
             let mut position = 0i64;
             offsets.write_all(&position.to_le_bytes())?;
-            let mut stmt = self
-                .db
-                .prepare("SELECT value FROM strings WHERE field=? ORDER BY code")?;
-            let mut rows = stmt.query([field as i64])?;
-            while let Some(row) = rows.next()? {
-                let value: String = row.get(0)?;
+            for (value, _) in &values {
                 data.write_all(value.as_bytes())?;
                 position += value.len() as i64;
                 offsets.write_all(&position.to_le_bytes())?;
@@ -140,7 +100,7 @@ impl<'a> Dictionaries<'a> {
                 name.to_string(),
                 json!({
                     "data": data_path, "offsets": offsets_path, "encoding": "utf-8",
-                    "null_code": -1, "count": self.counts[field],
+                    "null_code": -1, "count": values.len(),
                 }),
             );
         }

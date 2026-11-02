@@ -16,9 +16,6 @@ def main(argv=None) -> int:
         "--workdir", help="Scratch directory for indexes and spools (default: beside outdir)"
     )
     parser.add_argument(
-        "--cache-mb", type=int, default=32, help="SQLite dictionary cache (default: 32 MiB)"
-    )
-    parser.add_argument(
         "--sort-mb", type=int, default=64, help="Node reference sort run size (default: 64 MiB)"
     )
     parser.add_argument(
@@ -33,7 +30,6 @@ def main(argv=None) -> int:
             args.outdir,
             tile_degrees=args.tile_degrees,
             workdir=args.workdir,
-            cache_mb=args.cache_mb,
             sort_mb=args.sort_mb,
             spool_mb=args.spool_mb,
             threads=args.threads,

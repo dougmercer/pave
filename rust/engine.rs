@@ -1,4 +1,4 @@
-use crate::index::{DiskIndex, KEY_BITS, NodeTags, RefSorter, TAGGED, database, writer};
+use crate::index::{DiskIndex, KEY_BITS, NodeTags, RefSorter, TAGGED, writer};
 use crate::storage::{Attributes, COLUMNS, Dictionaries, STRING_SLOTS, Spools};
 use crate::tags::{self, HIGHWAYS, STRINGS, Tags, WAY_STRINGS};
 use anyhow::{Context, Result, ensure};
@@ -23,8 +23,6 @@ pub struct Config {
     pub output: PathBuf,
     pub scratch: PathBuf,
     pub degrees: f64,
-    /// SQLite page cache for the string dictionaries.
-    pub cache_mb: usize,
     /// In-memory run size for the external sort of node references.
     pub sort_mb: usize,
     /// Edge rows and vertices buffered across all tiles before spilling to scratch.
@@ -569,8 +567,8 @@ pub fn run(config: Config) -> Result<String> {
         "tile_degrees must be finite and in (0, 180]"
     );
     ensure!(
-        config.threads > 0 && config.cache_mb > 0 && config.sort_mb > 0 && config.spool_mb > 0,
-        "threads, cache_mb, sort_mb and spool_mb must be positive"
+        config.threads > 0 && config.sort_mb > 0 && config.spool_mb > 0,
+        "threads, sort_mb and spool_mb must be positive"
     );
     let log = |message| {
         if !config.quiet {
@@ -596,10 +594,8 @@ pub fn run(config: Config) -> Result<String> {
         node_tags: &node_tags,
         barriers: &barriers,
     };
-    let db = database(&config.scratch.join("output.sqlite"), config.cache_mb)?;
-    let mut dictionaries = Dictionaries::new(&db)?;
+    let mut dictionaries = Dictionaries::default();
     let mut spools = Spools::new(&config.scratch, config.degrees, config.spool_mb << 20)?;
-    db.execute_batch("BEGIN")?;
     pipeline(
         &config,
         &pool,
@@ -634,7 +630,6 @@ pub fn run(config: Config) -> Result<String> {
         },
     )?;
     spools.close()?;
-    db.execute_batch("COMMIT")?;
     drop((nodes, node_tags));
     fs::remove_file(locations_path)?;
     fs::remove_file(node_tags_path)?;
@@ -670,7 +665,7 @@ pub fn run(config: Config) -> Result<String> {
         "edges": spools.edges, "vertices": spools.vertices, "tiles": tiles, "drivable_ways": ways,
         "stages": {"topology_seconds": topology_seconds, "edges_seconds": edges_seconds,
                    "columns_seconds": phase.elapsed().as_secs_f64()}, "source": source,
-        "settings": {"tile_degrees": config.degrees, "cache_mb": config.cache_mb, "sort_mb": config.sort_mb,
+        "settings": {"tile_degrees": config.degrees, "sort_mb": config.sort_mb,
                      "spool_mb": config.spool_mb, "threads": config.threads},
         "buffers": {"sort_runs": sort_runs, "spool_flushes": spools.flushes},
         "implementation": "rust",

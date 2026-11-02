@@ -260,7 +260,7 @@ def test_tile_handle_eviction_and_revisit(pbf, tmp_path):
     for i in range(45):
         ways.append((i + 100, [2 * i + 1, 2 * i + 2], {"highway": "road", "name": "revisit"}))
     out = tmp_path / "roads"
-    preprocess(pbf(nodes, ways), out, cache_mb=1, threads=1)
+    preprocess(pbf(nodes, ways), out, threads=1)
     data = read_bbox(out, -180, -90, 180, 90)
     assert len(data["tile_ids"]) == 45
     assert len(data["u"]) == 180
@@ -275,8 +275,8 @@ def test_tile_handle_eviction_and_revisit(pbf, tmp_path):
         ]
 
 
-def test_chunked_columns_and_dictionary_cache_eviction(pbf, tmp_path):
-    # Cross the native 32,768-row conversion boundary and 8,192-value dictionary cache.
+def test_chunked_columns_and_repeated_dictionary_values(pbf, tmp_path):
+    # Cross the native 32,768-row conversion boundary, revisiting every string.
     count = 33000
     path = pbf(
         {1: (0, 0), 2: (0.01, 0)},
@@ -387,7 +387,7 @@ def test_small_buffers_spill_without_changing_output(pbf, tmp_path):
     assert dataset_files(tmp_path / "small") == dataset_files(tmp_path / "large")
 
 
-@pytest.mark.parametrize("setting", ["cache_mb", "sort_mb", "spool_mb", "threads"])
+@pytest.mark.parametrize("setting", ["sort_mb", "spool_mb", "threads"])
 def test_buffer_settings_must_be_positive(pbf, tmp_path, setting):
     path = pbf({1: (0, 0), 2: (0.1, 0.1)}, [(1, [1, 2], {"highway": "road"})])
     with pytest.raises(ValueError, match="positive"):

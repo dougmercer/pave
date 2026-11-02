@@ -1,7 +1,6 @@
 use anyhow::{Result, ensure};
 use memmap2::Mmap;
 use rayon::prelude::*;
-use rusqlite::Connection;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::fs::File;
@@ -12,16 +11,6 @@ use std::path::{Path, PathBuf};
 pub const KEY_BITS: u32 = 2;
 const JUNCTION: i64 = 1;
 pub const TAGGED: i64 = 2;
-
-pub fn database(path: &Path, cache_mb: usize) -> Result<Connection> {
-    let db = Connection::open(path)?;
-    db.execute_batch(&format!(
-        "PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA temp_store=FILE;
-         PRAGMA mmap_size=0; PRAGMA cache_size=-{};",
-        cache_mb * 1024
-    ))?;
-    Ok(db)
-}
 
 pub fn writer(path: &Path) -> Result<BufWriter<File>> {
     Ok(BufWriter::with_capacity(256 * 1024, File::create(path)?))

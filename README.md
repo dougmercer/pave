@@ -8,9 +8,9 @@ publication, and the NumPy reader. The native call releases the GIL.
 
 ## Install and run
 
-Requires Python 3.11+, a Rust toolchain, and macOS or Linux. SQLite is compiled
-into the extension. Pyosmium is only a development dependency for generating
-fixtures and independently checking real PBF data.
+Requires Python 3.11+, a Rust toolchain, and macOS or Linux. Pyosmium is only a
+development dependency for generating fixtures and independently checking real PBF
+data.
 
 ```sh
 uv sync
@@ -29,17 +29,17 @@ Options:
 
 ```sh
 prep input.osm.pbf outdir/ --tile-degrees 0.1 --workdir /fast-disk/scratch \
-    --threads 8 --cache-mb 32 --sort-mb 64 --spool-mb 64
+    --threads 8 --sort-mb 64 --spool-mb 64
 ```
 
 Scratch files go beside the output unless `--workdir` names another disk.
 `--threads` sets the workers that decode and transform PBF blocks and read the
 spool back, and bounds the blocks in flight; one more thread reads the file and the
-calling thread writes output. `--cache-mb` sizes the SQLite cache for string dictionaries. `--sort-mb`
-limits each in-memory run when sorting node references, and `--spool-mb` limits
-tile output buffered in RAM. Exceeding either spills to scratch and never changes
-the output. The report's `buffers` section shows `sort_runs` and `spool_flushes`,
-which reveal whether a larger setting would help. `--quiet` suppresses stderr
+calling thread writes output. `--sort-mb` limits each in-memory run when sorting
+node references, and `--spool-mb` limits tile output buffered in RAM. Exceeding
+either spills to scratch and never changes the output. The report's `buffers`
+section shows `sort_runs` and `spool_flushes`, which reveal whether a larger setting
+would help. `--quiet` suppresses stderr
 progress. Stdout is a JSON performance report, also saved as `outdir/stats.json`.
 
 Input must be a snapshot with **unique, ascending node IDs and way IDs**, as in
@@ -221,17 +221,17 @@ per-block work happen on the worker threads, in order. Writing columns reads tho
 chunks back concurrently, because the page cache may have evicted the log by then
 and each evicted chunk is a separate disk read.
 
-The native process keeps bounded PBF batches, one sort run (`--sort-mb`), buffered
-tile output (`--spool-mb`), a SQLite cache (`--cache-mb`), and an 8,192-entry string
-cache. Global dictionaries live in SQLite. Tile metadata and each tile's list of
-spool chunks stay in RAM, which scales with the tile count and flushes rather than
-the extract size, as does the small table of distinct barrier values. No complete extract, topology hash map, or tile's complete geometry
+The native process keeps bounded PBF batches, one sort run (`--sort-mb`), and buffered
+tile output (`--spool-mb`). Dictionaries of distinct strings stay in RAM, which grows
+with an extract's road names rather than its geometry. Tile metadata and each tile's
+list of spool chunks stay in RAM too, which scales with the tile count and flushes
+rather than the extract size, as does the small table of distinct barrier values. No complete extract, topology hash map, or tile's complete geometry
 is accumulated in application RAM. Memory-mapped index pages are demand-paged by
 the OS, so observed RSS includes resident file-backed pages.
 
 Budget scratch disk for the sorted runs (8 bytes per reference), used-node list
 (8 bytes per used node), location index (24 bytes per used node, plus 24 per node
-with a barrier or limit), dictionary database, spool log, and output. The spool log
+with a barrier or limit), spool log, and output. The spool log
 uses 16 bytes per directed vertex and 98 bytes per edge. Final edge columns use 98
 bytes per edge plus 16 bytes per directed vertex, dictionaries, and small `.npy`
 headers. Runs, the used-node list, and the location indexes are deleted as soon as
