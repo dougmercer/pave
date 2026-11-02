@@ -2,7 +2,7 @@ use anyhow::{Result, ensure};
 use memmap2::Mmap;
 use rayon::prelude::*;
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, binary_heap::PeekMut};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -196,7 +196,8 @@ impl RefSorter {
         let mut out = writer(path)?;
         let mut current = None;
         let (mut uses, mut endpoint) = (0u64, false);
-        while let Some(Reverse((value, i))) = heap.pop() {
+        while let Some(mut top) = heap.peek_mut() {
+            let Reverse((value, i)) = *top;
             let id = value >> KEY_BITS;
             if current != Some(id) {
                 if let Some(id) = current {
@@ -208,8 +209,9 @@ impl RefSorter {
             }
             uses += 1;
             endpoint |= value & JUNCTION != 0;
-            if let Some(next) = read_i64(&mut runs[i])? {
-                heap.push(Reverse((next, i)));
+            match read_i64(&mut runs[i])? {
+                Some(next) => *top = Reverse((next, i)),
+                None => drop(PeekMut::pop(top)),
             }
         }
         if let Some(id) = current {
