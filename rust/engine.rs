@@ -2,7 +2,7 @@ use crate::index::{
     LOCATION_BYTES, NodeIds, NodeIndex, NodeTagIndex, NodeTags, location_record, writer,
 };
 use crate::pbf::{Blob, Block, Header, Node, Pbf, Way};
-use crate::storage::{Attributes, COLUMNS, Dictionaries, STRING_SLOTS, Spools};
+use crate::storage::{Attributes, COLUMNS, Dictionaries, Grid, STRING_SLOTS, Spools, TileRows};
 use crate::tags::{self, HIGHWAYS, STRINGS, WAY_STRINGS};
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, SecondsFormat};
@@ -391,6 +391,37 @@ struct Prepared {
     points: Vec<[f64; 2]>,
 }
 
+impl Prepared {
+    /// Everything spooling needs, with edges grouped by tile and otherwise still in order.
+    fn tile_rows(&self, grid: &Grid) -> TileRows {
+        let first = |edge: &PreparedEdge| {
+            self.points[if edge.reverse {
+                edge.points.end - 1
+            } else {
+                edge.points.start
+            }]
+        };
+        let edges = self.edges.iter().enumerate();
+        let mut order: Vec<_> = edges.map(|(i, edge)| (grid.cell(first(edge)), i)).collect();
+        order.sort_unstable();
+        let mut rows = TileRows::default();
+        for (cell, i) in order {
+            let edge = &self.edges[i];
+            let segment = &self.points[edge.points.clone()];
+            rows.push(
+                cell,
+                edge.u,
+                edge.v,
+                segment,
+                edge.reverse,
+                &edge.attributes,
+                edge.bbox,
+            );
+        }
+        rows
+    }
+}
+
 /// Great-circle metres along a polyline, on the IUGG mean Earth radius.
 fn length_m(points: &[[f64; 2]]) -> f64 {
     points
@@ -603,52 +634,54 @@ pub fn run(config: Config) -> Result<String> {
     };
     let mut dictionaries = Dictionaries::default();
     let mut spools = Spools::new(&config.scratch, config.degrees, config.spool_mb << 20)?;
-    // Strings are coded in block order here; a second thread does the slower spooling.
-    let (sender, receiver) = sync_channel::<Prepared>(2);
+    let grid = Grid::new(config.degrees);
+    // Strings are coded in block order here, then any worker can serialize the block for a
+    // second thread, which spools blocks in order.
+    let (sender, receiver) = sync_channel::<Receiver<TileRows>>(config.threads * 2);
     std::thread::scope(|scope| {
         let spooled = scope.spawn(|| -> Result<()> {
-            for prepared in receiver {
-                for edge in &prepared.edges {
-                    let segment = &prepared.points[edge.points.clone()];
-                    spools.append(
-                        edge.u,
-                        edge.v,
-                        segment,
-                        edge.reverse,
-                        &edge.attributes,
-                        edge.bbox,
-                    )?;
-                }
+            for slot in receiver {
+                // A closed slot means its worker panicked, which the scope reports.
+                let Ok(rows) = slot.recv() else { break };
+                spools.append(&rows)?;
             }
             spools.close()
         });
-        let coded = pipeline(
-            &pbf,
-            &config,
-            &pool,
-            &way_blocks,
-            |_, block| prepare_block(block, &lookups),
-            |mut prepared| {
-                for way in &prepared.ways {
-                    let mut codes = [0; STRINGS.len()];
-                    for (i, value) in way.strings.iter().enumerate() {
-                        codes[i] = dictionaries.code(i, value.as_deref())?;
-                    }
-                    for edge in &mut prepared.edges[way.edges.clone()] {
-                        codes[WAY_STRINGS] =
-                            dictionaries.code(WAY_STRINGS, edge.barrier.as_deref())?;
-                        codes[WAY_STRINGS + 1] =
-                            dictionaries.code(WAY_STRINGS + 1, edge.barrier_at_v.as_deref())?;
-                        for (slot, code) in STRING_SLOTS.iter().zip(codes) {
-                            edge.attributes[*slot..slot + 4].copy_from_slice(&code.to_le_bytes());
+        let coded = pool.in_place_scope(|tasks| {
+            pipeline(
+                &pbf,
+                &config,
+                &pool,
+                &way_blocks,
+                |_, block| prepare_block(block, &lookups),
+                |mut prepared| {
+                    for way in &prepared.ways {
+                        let mut codes = [0; STRINGS.len()];
+                        for (i, value) in way.strings.iter().enumerate() {
+                            codes[i] = dictionaries.code(i, value.as_deref())?;
+                        }
+                        for edge in &mut prepared.edges[way.edges.clone()] {
+                            codes[WAY_STRINGS] =
+                                dictionaries.code(WAY_STRINGS, edge.barrier.as_deref())?;
+                            codes[WAY_STRINGS + 1] =
+                                dictionaries.code(WAY_STRINGS + 1, edge.barrier_at_v.as_deref())?;
+                            for (slot, code) in STRING_SLOTS.iter().zip(codes) {
+                                edge.attributes[*slot..slot + 4]
+                                    .copy_from_slice(&code.to_le_bytes());
+                            }
                         }
                     }
-                }
-                // A closed channel means spooling failed, which joining the thread reports.
-                let _ = sender.send(prepared);
-                Ok(())
-            },
-        );
+                    let (result, slot) = sync_channel(1);
+                    // A closed channel means spooling failed, which joining the thread reports.
+                    let _ = sender.send(slot);
+                    let grid = &grid;
+                    tasks.spawn(move |_| {
+                        let _ = result.send(prepared.tile_rows(grid));
+                    });
+                    Ok(())
+                },
+            )
+        });
         drop(sender);
         let spooled = spooled.join().expect("spool thread panicked");
         spooled.and(coded)

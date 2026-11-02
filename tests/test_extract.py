@@ -457,10 +457,11 @@ def test_small_buffers_spill_without_changing_output(pbf, tmp_path):
     # Both directions of 200,000 vertices overflow a 1 MiB tile buffer.
     count = 200_000
     nodes = {i + 1: ((i % 700) * 0.01, (i // 700) * 0.01) for i in range(count)}
-    # Shuffled IDs make ways arrive out of spatial order, so tiles are flushed repeatedly.
-    ids = random.Random(11).sample(range(1, count), count // 50 - 1)
+    # Enough ways for several blocks, and shuffled IDs make them arrive out of spatial order,
+    # so each block adds to most tiles and they are flushed repeatedly.
+    ids = random.Random(11).sample(range(1, count), count // 5 - 1)
     ways = [
-        (ids[i], [*range(i * 50 + 1, i * 50 + 52)], {"highway": "road", "name": f"w{i % 7}"})
+        (ids[i], [*range(i * 5 + 1, i * 5 + 7)], {"highway": "road", "name": f"w{i % 7}"})
         for i in range(len(ids))
     ]
     path = pbf(nodes, ways)

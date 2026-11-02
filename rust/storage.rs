@@ -139,13 +139,100 @@ struct Tile {
     chunks: Vec<Chunk>,
 }
 
+/// How coordinates map to tile cells.
+#[derive(Clone, Copy)]
+pub struct Grid {
+    degrees: f64,
+    max_x: i64,
+    max_y: i64,
+}
+
+impl Grid {
+    pub fn new(degrees: f64) -> Self {
+        Self {
+            degrees,
+            max_x: (360.0 / degrees).ceil() as i64 - 1,
+            max_y: (180.0 / degrees).ceil() as i64 - 1,
+        }
+    }
+
+    pub fn cell(&self, point: [f64; 2]) -> (i32, i32) {
+        let x = (((point[0] + 180.0) / self.degrees).floor() as i64).min(self.max_x);
+        let y = (((point[1] + 90.0) / self.degrees).floor() as i64).min(self.max_y);
+        (x as i32, y as i32)
+    }
+}
+
+/// One tile's edges within `TileRows`, ending at these buffer positions.
+struct TileRun {
+    cell: (i32, i32),
+    rows: usize,
+    coords: usize,
+    bbox: [f64; 4],
+}
+
+/// A block's edges in spool format, grouped by tile. Building this on a worker leaves the
+/// spool thread only whole runs to copy.
+#[derive(Default)]
+pub struct TileRows {
+    rows: Vec<u8>,
+    coords: Vec<u8>,
+    runs: Vec<TileRun>,
+}
+
+impl TileRows {
+    /// Add an edge, after every earlier edge of its tile and before any of a later tile.
+    #[allow(clippy::too_many_arguments)]
+    pub fn push(
+        &mut self,
+        cell: (i32, i32),
+        u: i64,
+        v: i64,
+        geometry: &[[f64; 2]],
+        reverse: bool,
+        attributes: &Attributes,
+        bbox: [f64; 4],
+    ) {
+        let mut row = [0u8; ROW_BYTES];
+        row[..8].copy_from_slice(&u.to_le_bytes());
+        row[8..16].copy_from_slice(&v.to_le_bytes());
+        row[16..VERTEX_COUNT].copy_from_slice(attributes);
+        row[VERTEX_COUNT..].copy_from_slice(&(geometry.len() as i64).to_le_bytes());
+        self.rows.extend_from_slice(&row);
+        for i in 0..geometry.len() {
+            let point = geometry[if reverse { geometry.len() - i - 1 } else { i }];
+            self.coords.extend_from_slice(&point[0].to_le_bytes());
+            self.coords.extend_from_slice(&point[1].to_le_bytes());
+        }
+        if self.runs.last().is_none_or(|run| run.cell != cell) {
+            self.runs.push(TileRun {
+                cell,
+                rows: 0,
+                coords: 0,
+                bbox: [180.0, 90.0, -180.0, -90.0],
+            });
+        }
+        let run = self.runs.last_mut().unwrap();
+        run.rows = self.rows.len();
+        run.coords = self.coords.len();
+        run.bbox = union(run.bbox, bbox);
+    }
+}
+
+fn union(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
+    [
+        a[0].min(b[0]),
+        a[1].min(b[1]),
+        a[2].max(b[2]),
+        a[3].max(b[3]),
+    ]
+}
+
 pub struct Spools {
     log_path: PathBuf,
     log: BufWriter<File>,
     log_bytes: u64,
     degrees: f64,
-    max_x: i64,
-    max_y: i64,
     tiles: HashMap<(i32, i32), Tile>,
     buffered: usize,
     limit: usize,
@@ -162,8 +249,6 @@ impl Spools {
             log_path,
             log_bytes: 0,
             degrees,
-            max_x: (360.0 / degrees).ceil() as i64 - 1,
-            max_y: (180.0 / degrees).ceil() as i64 - 1,
             tiles: HashMap::new(),
             buffered: 0,
             limit,
@@ -215,12 +300,11 @@ impl Spools {
         Ok(())
     }
 
-    fn tile(&mut self, first: [f64; 2]) -> &mut Tile {
+    fn tile(&mut self, (x, y): (i32, i32)) -> &mut Tile {
         let size = self.degrees;
-        let x = (((first[0] + 180.0) / size).floor() as i64).min(self.max_x);
-        let y = (((first[1] + 90.0) / size).floor() as i64).min(self.max_y);
-        self.tiles.entry((x as i32, y as i32)).or_insert_with(|| {
+        self.tiles.entry((x, y)).or_insert_with(|| {
             let id = format!("{x}_{y}");
+            let (x, y) = (f64::from(x), f64::from(y));
             Tile {
                 meta: TileMeta {
                     id,
@@ -230,10 +314,10 @@ impl Spools {
                     vertices: 0,
                     bbox: [180.0, 90.0, -180.0, -90.0],
                     grid_bbox: [
-                        x as f64 * size - 180.0,
-                        y as f64 * size - 90.0,
-                        ((x + 1) as f64 * size - 180.0).min(180.0),
-                        ((y + 1) as f64 * size - 90.0).min(90.0),
+                        x * size - 180.0,
+                        y * size - 90.0,
+                        ((x + 1.0) * size - 180.0).min(180.0),
+                        ((y + 1.0) * size - 90.0).min(90.0),
                     ],
                 },
                 rows: Vec::new(),
@@ -243,45 +327,25 @@ impl Spools {
         })
     }
 
-    pub fn append(
-        &mut self,
-        u: i64,
-        v: i64,
-        geometry: &[[f64; 2]],
-        reverse: bool,
-        attributes: &Attributes,
-        bbox: [f64; 4],
-    ) -> Result<()> {
-        let first = if reverse {
-            *geometry.last().unwrap()
-        } else {
-            geometry[0]
-        };
-        let tile = self.tile(first);
-        let mut row = [0u8; ROW_BYTES];
-        row[..8].copy_from_slice(&u.to_le_bytes());
-        row[8..16].copy_from_slice(&v.to_le_bytes());
-        row[16..VERTEX_COUNT].copy_from_slice(attributes);
-        row[VERTEX_COUNT..].copy_from_slice(&(geometry.len() as i64).to_le_bytes());
-        tile.rows.extend_from_slice(&row);
-        for i in 0..geometry.len() {
-            let point = geometry[if reverse { geometry.len() - i - 1 } else { i }];
-            tile.coords.extend_from_slice(&point[0].to_le_bytes());
-            tile.coords.extend_from_slice(&point[1].to_le_bytes());
-        }
-        tile.meta.edges += 1;
-        tile.meta.vertices += geometry.len() as u64;
-        tile.meta.bbox = [
-            tile.meta.bbox[0].min(bbox[0]),
-            tile.meta.bbox[1].min(bbox[1]),
-            tile.meta.bbox[2].max(bbox[2]),
-            tile.meta.bbox[3].max(bbox[3]),
-        ];
-        self.edges += 1;
-        self.vertices += geometry.len() as u64;
-        self.buffered += ROW_BYTES + geometry.len() * 16;
-        if self.buffered > self.limit {
-            self.spill(self.limit / 2)?;
+    pub fn append(&mut self, batch: &TileRows) -> Result<()> {
+        let (mut rows, mut coords) = (0, 0);
+        for run in &batch.runs {
+            let tile = self.tile(run.cell);
+            tile.rows.extend_from_slice(&batch.rows[rows..run.rows]);
+            tile.coords
+                .extend_from_slice(&batch.coords[coords..run.coords]);
+            let edges = ((run.rows - rows) / ROW_BYTES) as u64;
+            let vertices = ((run.coords - coords) / 16) as u64;
+            tile.meta.edges += edges;
+            tile.meta.vertices += vertices;
+            tile.meta.bbox = union(tile.meta.bbox, run.bbox);
+            self.edges += edges;
+            self.vertices += vertices;
+            self.buffered += run.rows - rows + run.coords - coords;
+            (rows, coords) = (run.rows, run.coords);
+            if self.buffered > self.limit {
+                self.spill(self.limit / 2)?;
+            }
         }
         Ok(())
     }
