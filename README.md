@@ -34,8 +34,8 @@ prep input.osm.pbf outdir/ --tile-degrees 0.1 --workdir /fast-disk/scratch \
 
 Scratch files go beside the output unless `--workdir` names another disk.
 `--threads` sets the workers that decode and transform PBF blocks and read the
-spool back, and bounds the blocks in flight; one more thread reads the file and the
-calling thread writes output. `--sort-mb` limits each in-memory run when sorting
+spool back, and bounds the blocks in flight; one more thread reads the file, the
+calling thread assigns string codes, and one more spools edges. `--sort-mb` limits each in-memory run when sorting
 node references, and `--spool-mb` limits tile output buffered in RAM. Exceeding
 either spills to scratch and never changes the output. The report's `buffers`
 section shows `sort_runs` and `spool_flushes`, which reveal whether a larger setting

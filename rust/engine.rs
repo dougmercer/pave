@@ -591,40 +591,55 @@ pub fn run(config: Config) -> Result<String> {
     };
     let mut dictionaries = Dictionaries::default();
     let mut spools = Spools::new(&config.scratch, config.degrees, config.spool_mb << 20)?;
-    pipeline(
-        &config,
-        &pool,
-        &way_blocks,
-        |_, block| prepare_block(block, &lookups),
-        |prepared| {
-            for way in &prepared.ways {
-                let mut codes = [0; STRINGS.len()];
-                for (i, value) in way.strings.iter().enumerate() {
-                    codes[i] = dictionaries.code(i, value.as_deref())?;
-                }
-                for edge in &prepared.edges[way.edges.clone()] {
-                    let mut attributes = edge.attributes;
-                    codes[WAY_STRINGS] = dictionaries.code(WAY_STRINGS, edge.barrier.as_deref())?;
-                    codes[WAY_STRINGS + 1] =
-                        dictionaries.code(WAY_STRINGS + 1, edge.barrier_at_v.as_deref())?;
-                    for (slot, code) in STRING_SLOTS.iter().zip(codes) {
-                        attributes[*slot..slot + 4].copy_from_slice(&code.to_le_bytes());
-                    }
+    // Strings are coded in block order here; a second thread does the slower spooling.
+    let (sender, receiver) = sync_channel::<Prepared>(2);
+    std::thread::scope(|scope| {
+        let spooled = scope.spawn(|| -> Result<()> {
+            for prepared in receiver {
+                for edge in &prepared.edges {
                     let segment = &prepared.points[edge.points.clone()];
                     spools.append(
                         edge.u,
                         edge.v,
                         segment,
                         edge.reverse,
-                        &attributes,
+                        &edge.attributes,
                         edge.bbox,
                     )?;
                 }
             }
-            Ok(())
-        },
-    )?;
-    spools.close()?;
+            spools.close()
+        });
+        let coded = pipeline(
+            &config,
+            &pool,
+            &way_blocks,
+            |_, block| prepare_block(block, &lookups),
+            |mut prepared| {
+                for way in &prepared.ways {
+                    let mut codes = [0; STRINGS.len()];
+                    for (i, value) in way.strings.iter().enumerate() {
+                        codes[i] = dictionaries.code(i, value.as_deref())?;
+                    }
+                    for edge in &mut prepared.edges[way.edges.clone()] {
+                        codes[WAY_STRINGS] =
+                            dictionaries.code(WAY_STRINGS, edge.barrier.as_deref())?;
+                        codes[WAY_STRINGS + 1] =
+                            dictionaries.code(WAY_STRINGS + 1, edge.barrier_at_v.as_deref())?;
+                        for (slot, code) in STRING_SLOTS.iter().zip(codes) {
+                            edge.attributes[*slot..slot + 4].copy_from_slice(&code.to_le_bytes());
+                        }
+                    }
+                }
+                // A closed channel means spooling failed, which joining the thread reports.
+                let _ = sender.send(prepared);
+                Ok(())
+            },
+        );
+        drop(sender);
+        let spooled = spooled.join().expect("spool thread panicked");
+        spooled.and(coded)
+    })?;
     drop((nodes, node_tags));
     fs::remove_file(locations_path)?;
     fs::remove_file(node_tags_path)?;
