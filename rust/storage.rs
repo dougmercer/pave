@@ -6,9 +6,10 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::fs::{self, File, OpenOptions};
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::fs::{self, File};
+use std::io::{BufWriter, Write};
 use std::num::NonZeroUsize;
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
 pub const ROW_BYTES: usize = 74;
@@ -146,14 +147,24 @@ struct TileMeta {
     grid_bbox: [f64; 4],
 }
 
+/// One spilled buffer's rows and coordinates in the shared spool log.
+struct Chunk {
+    start: u64,
+    rows: usize,
+    coords: usize,
+}
+
 struct Tile {
     meta: TileMeta,
     rows: Vec<u8>,
     coords: Vec<u8>,
+    chunks: Vec<Chunk>,
 }
 
 pub struct Spools {
-    scratch: PathBuf,
+    log_path: PathBuf,
+    log: BufWriter<File>,
+    log_bytes: u64,
     degrees: f64,
     max_x: i64,
     max_y: i64,
@@ -167,8 +178,11 @@ pub struct Spools {
 
 impl Spools {
     pub fn new(scratch: &Path, degrees: f64, limit: usize) -> Result<Self> {
+        let log_path = scratch.join("tiles.spool");
         Ok(Self {
-            scratch: scratch.to_owned(),
+            log: writer(&log_path)?,
+            log_path,
+            log_bytes: 0,
             degrees,
             max_x: (360.0 / degrees).ceil() as i64 - 1,
             max_y: (180.0 / degrees).ceil() as i64 - 1,
@@ -181,16 +195,7 @@ impl Spools {
         })
     }
 
-    fn append_file(path: &Path, bytes: &[u8]) -> Result<()> {
-        OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(path)?
-            .write_all(bytes)?;
-        Ok(())
-    }
-
-    /// Write the largest buffers, so each open/close moves as many bytes as possible.
+    /// Log the largest buffers first, so each chunk moves as many bytes as possible.
     fn spill(&mut self, target: usize) -> Result<()> {
         let mut tiles: Vec<_> = self.tiles.values_mut().collect();
         tiles.sort_unstable_by_key(|tile| std::cmp::Reverse(tile.rows.len() + tile.coords.len()));
@@ -198,14 +203,16 @@ impl Spools {
             if self.buffered <= target {
                 break;
             }
-            let id = &tile.meta.id;
-            if !tile.rows.is_empty() {
-                Self::append_file(&self.scratch.join(format!("{id}.rows")), &tile.rows)?;
-            }
-            if !tile.coords.is_empty() {
-                Self::append_file(&self.scratch.join(format!("{id}.coords")), &tile.coords)?;
-            }
-            self.buffered -= tile.rows.len() + tile.coords.len();
+            let bytes = tile.rows.len() + tile.coords.len();
+            tile.chunks.push(Chunk {
+                start: self.log_bytes,
+                rows: tile.rows.len(),
+                coords: tile.coords.len(),
+            });
+            self.log.write_all(&tile.rows)?;
+            self.log.write_all(&tile.coords)?;
+            self.log_bytes += bytes as u64;
+            self.buffered -= bytes;
             self.flushes += 1;
             tile.rows = Vec::new();
             tile.coords = Vec::new();
@@ -214,7 +221,9 @@ impl Spools {
     }
 
     pub fn close(&mut self) -> Result<()> {
-        self.spill(0)
+        self.spill(0)?;
+        self.log.flush()?;
+        Ok(())
     }
 
     fn tile(&mut self, first: [f64; 2]) -> &mut Tile {
@@ -240,6 +249,7 @@ impl Spools {
                 },
                 rows: Vec::new(),
                 coords: Vec::new(),
+                chunks: Vec::new(),
             }
         })
     }
@@ -304,6 +314,8 @@ impl Spools {
         let header = serde_json::to_string_pretty(metadata)?;
         manifest.write_all(header.trim_end_matches('}').trim_end().as_bytes())?;
         manifest.write_all(b",\n  \"tiles\": [\n")?;
+        let log = File::open(&self.log_path)?;
+        let mut buffer = Vec::new();
         let (mut edge_start, mut vertex_start) = (0, 0);
         let mut count = 0u64;
         let mut keys: Vec<_> = self.tiles.keys().copied().collect();
@@ -314,12 +326,23 @@ impl Spools {
             tile.meta.vertex_start = vertex_start;
             edge_start += tile.meta.edges;
             vertex_start += tile.meta.vertices;
-            let meta = &self.tiles[&key].meta;
-            self.finish_tile(meta, &mut columns, &mut offsets, &mut vertices)?;
+            let tile = &self.tiles[&key];
+            let position = tile.meta.vertex_start as i64;
+            let tile_vertices = tile.meta.vertices;
+            Self::finish_tile(
+                &log,
+                &tile.chunks,
+                &mut buffer,
+                &mut columns,
+                &mut offsets,
+                &mut vertices,
+                position,
+                tile_vertices,
+            )?;
             if count > 0 {
                 manifest.write_all(b",\n")?;
             }
-            serde_json::to_writer(&mut manifest, meta)?;
+            serde_json::to_writer(&mut manifest, &tile.meta)?;
             count += 1;
         }
         for column in &mut columns {
@@ -329,49 +352,43 @@ impl Spools {
         vertices.flush()?;
         manifest.write_all(b"\n  ]\n}\n")?;
         manifest.flush()?;
+        fs::remove_file(&self.log_path)?;
         Ok(count)
     }
 
     /// Append one tile to the shared columns; offsets stay global across tiles.
+    #[allow(clippy::too_many_arguments)]
     fn finish_tile(
-        &self,
-        meta: &TileMeta,
+        log: &File,
+        chunks: &[Chunk],
+        buffer: &mut Vec<u8>,
         columns: &mut [BufWriter<File>],
         offsets: &mut BufWriter<File>,
         vertices: &mut BufWriter<File>,
+        mut position: i64,
+        tile_vertices: u64,
     ) -> Result<()> {
-        let mut position = meta.vertex_start as i64;
-        let rows_path = self.scratch.join(format!("{}.rows", meta.id));
-        let coords_path = self.scratch.join(format!("{}.coords", meta.id));
-        let mut rows = BufReader::new(File::open(&rows_path)?);
-        let mut buffer = vec![0u8; ROW_BYTES * 32768];
-        let mut remaining = meta.edges;
-        while remaining > 0 {
-            let n = remaining.min(32768) as usize;
-            let chunk = &mut buffer[..n * ROW_BYTES];
-            rows.read_exact(chunk)?;
+        let stop = position + tile_vertices as i64;
+        for chunk in chunks {
+            let size = chunk.rows + chunk.coords;
+            if buffer.len() < size {
+                buffer.resize(size, 0);
+            }
+            let bytes = &mut buffer[..size];
+            log.read_exact_at(bytes, chunk.start)?;
+            let (rows, coords) = bytes.split_at(chunk.rows);
             for (column, (_, _, start, width)) in columns.iter_mut().zip(COLUMNS) {
-                for row in chunk.chunks_exact(ROW_BYTES) {
+                for row in rows.chunks_exact(ROW_BYTES) {
                     column.write_all(&row[start..start + width])?;
                 }
             }
-            for row in chunk.chunks_exact(ROW_BYTES) {
+            for row in rows.chunks_exact(ROW_BYTES) {
                 position += i64::from_le_bytes(row[66..].try_into().unwrap());
                 offsets.write_all(&position.to_le_bytes())?;
             }
-            remaining -= n as u64;
+            vertices.write_all(coords)?;
         }
-        ensure!(
-            position as u64 == meta.vertex_start + meta.vertices,
-            "Vertex spool count mismatch"
-        );
-        let mut source = File::open(&coords_path)?;
-        let bytes = std::io::copy(&mut source, vertices)?;
-        ensure!(bytes == meta.vertices * 16, "Truncated vertex spool");
-        drop(rows);
-        drop(source);
-        fs::remove_file(rows_path)?;
-        fs::remove_file(coords_path)?;
+        ensure!(position == stop, "Vertex spool count mismatch");
         Ok(())
     }
 }
