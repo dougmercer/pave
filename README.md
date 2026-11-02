@@ -121,10 +121,10 @@ ranges of each column, ordered by grid `x` and then `y`.
 | `osmid.npy` | int64 `(E,)` | Original OSM way ID |
 | `width_m.npy` | float64 `(E,)` | Positive full carriageway width, same in both directions |
 | `highway.npy` | uint8 `(E,)` | Code in manifest `highway_enum` |
-| `maxspeed_kmh.npy`, `maxweight_t.npy`, `maxheight_m.npy` | float32 `(E,)` | Explicit converted limits; NaN when missing or not parseable |
+| `maxspeed_kmh.npy`, `maxweight_t.npy`, `maxheight_m.npy`, `maxwidth_m.npy`, `maxlength_m.npy` | float32 `(E,)` | Explicit converted limits; NaN when missing or not parseable |
 | `length_m.npy` | float32 `(E,)` | Great-circle length through every vertex, on a 6,371,008.8 m sphere |
 | `flags.npy` | uint8 `(E,)` | Boolean values and presence bits |
-| `access.npy`, `motor_vehicle.npy`, `hgv.npy`, `surface.npy`, `name.npy` | int32 `(E,)` | Global dictionary codes; `-1` means null |
+| `access.npy`, `motor_vehicle.npy`, `vehicle.npy`, `hgv.npy`, `surface.npy`, `name.npy` | int32 `(E,)` | Global dictionary codes; `-1` means null |
 
 `flags` bits are `bridge=1`, `tunnel=2`, `bridge_present=4`, and
 `tunnel_present=8`. Presence bits distinguish an absent tag from explicit `no`.
@@ -190,6 +190,9 @@ motorway 11, trunk 9, primary 7.5, secondary 7, tertiary 6.5, unclassified /
 residential / road 5.5, service 4, track 3.5, otherwise (including living_street)
 4 metres. Link class
 defaults are their base default × 0.6. Width is not divided by direction.
+
+`maxspeed_kmh` is per direction: `maxspeed:forward` applies along the way,
+`maxspeed:backward` against it, and `maxspeed` is the fallback for either.
 
 Explicit numeric tags accept unambiguous decimal/scientific quantities. Speed
 accepts bare km/h, `km/h`, `kmh`, `kph`, or `mph` (× 1.609344). Length accepts

@@ -20,7 +20,14 @@ pub const HIGHWAYS: [&str; 16] = [
     "tertiary_link",
     "living_street",
 ];
-pub const STRINGS: [&str; 5] = ["access", "motor_vehicle", "hgv", "surface", "name"];
+pub const STRINGS: [&str; 6] = [
+    "access",
+    "motor_vehicle",
+    "hgv",
+    "surface",
+    "name",
+    "vehicle",
+];
 pub type Tags = HashMap<String, String>;
 
 pub fn highway_code(value: &str) -> Option<u8> {

@@ -12,11 +12,13 @@ use std::num::NonZeroUsize;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
-pub const ROW_BYTES: usize = 78;
+pub const ROW_BYTES: usize = 90;
 pub const VERTEX_COUNT: usize = ROW_BYTES - 8;
 /// Everything in a row between `v` and the vertex count.
 pub type Attributes = [u8; VERTEX_COUNT - 16];
-pub const COLUMNS: [(&str, &str, usize, usize); 15] = [
+/// Where each `STRINGS` code sits within `Attributes`.
+pub const STRING_SLOTS: [usize; STRINGS.len()] = [30, 34, 38, 42, 46, 62];
+pub const COLUMNS: [(&str, &str, usize, usize); 18] = [
     ("u", "<i8", 0, 8),
     ("v", "<i8", 8, 8),
     ("osmid", "<i8", 16, 8),
@@ -32,6 +34,9 @@ pub const COLUMNS: [(&str, &str, usize, usize); 15] = [
     ("surface", "<i4", 58, 4),
     ("name", "<i4", 62, 4),
     ("length_m", "<f4", 66, 4),
+    ("maxwidth_m", "<f4", 70, 4),
+    ("maxlength_m", "<f4", 74, 4),
+    ("vehicle", "<i4", 78, 4),
 ];
 
 pub fn npy(path: &Path, dtype: &str, shape: &[u64]) -> Result<BufWriter<File>> {
@@ -55,7 +60,7 @@ pub fn npy(path: &Path, dtype: &str, shape: &[u64]) -> Result<BufWriter<File>> {
 pub struct Dictionaries<'a> {
     db: &'a Connection,
     cache: LruCache<(usize, String), i32>,
-    counts: [i64; 5],
+    counts: [i64; STRINGS.len()],
 }
 
 impl<'a> Dictionaries<'a> {
@@ -67,7 +72,7 @@ impl<'a> Dictionaries<'a> {
         Ok(Self {
             db,
             cache: LruCache::new(NonZeroUsize::new(8192).unwrap()),
-            counts: [0; 5],
+            counts: [0; STRINGS.len()],
         })
     }
 

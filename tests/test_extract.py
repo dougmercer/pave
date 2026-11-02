@@ -442,3 +442,61 @@ def test_length_crosses_the_antimeridian_the_short_way(pbf, tmp_path):
     preprocess(pbf(nodes, [(1, [1, 2], {"highway": "road", "oneway": "yes"})]), out)
     data = read_bbox(out, -180, -90, 180, 90)
     np.testing.assert_allclose(data["length_m"], 2223.9, rtol=1e-3)
+
+
+def directed(data, u, v):
+    return int(np.flatnonzero((data["u"] == u) & (data["v"] == v))[0])
+
+
+def test_extra_raw_tags_are_stored(pbf, tmp_path):
+    nodes = {1: (0.01, 0), 2: (0.02, 0)}
+    tags = {"highway": "road", "vehicle": "destination", "maxwidth": "2.2", "maxlength": "40 ft"}
+    out = tmp_path / "roads"
+    preprocess(pbf(nodes, [(1, [1, 2], tags)]), out)
+    data = read_bbox(out, -180, -90, 180, 90)
+    assert data["dictionaries"]["vehicle"][data["vehicle"][0]] == "destination"
+    assert data["maxwidth_m"][0] == pytest.approx(2.2)
+    assert data["maxlength_m"][0] == pytest.approx(12.192)
+
+
+def test_absent_extra_tags_are_null(pbf, tmp_path):
+    out = tmp_path / "roads"
+    preprocess(pbf({1: (0.01, 0), 2: (0.02, 0)}, [(1, [1, 2], {"highway": "road"})]), out)
+    data = read_bbox(out, -180, -90, 180, 90)
+    assert (data["vehicle"] == -1).all()
+    assert np.isnan(data["maxwidth_m"]).all() and np.isnan(data["maxlength_m"]).all()
+
+
+@pytest.mark.parametrize(
+    "tags,forward,backward",
+    [
+        ({"maxspeed:forward": "50", "maxspeed:backward": "30"}, 50, 30),
+        ({"maxspeed": "70", "maxspeed:backward": "30"}, 70, 30),
+        ({"maxspeed": "70", "maxspeed:forward": "50"}, 50, 70),
+        ({"maxspeed": "70", "maxspeed:forward": "signals"}, 70, 70),
+        ({"maxspeed:forward": "30 mph"}, 48.28032, None),
+    ],
+)
+def test_directional_speed_limits_apply_per_direction(pbf, tmp_path, tags, forward, backward):
+    nodes = {1: (0.01, 0), 2: (0.02, 0)}
+    out = tmp_path / "roads"
+    preprocess(pbf(nodes, [(1, [1, 2], {"highway": "road", **tags})]), out)
+    data = read_bbox(out, -180, -90, 180, 90)
+    assert data["maxspeed_kmh"][directed(data, 1, 2)] == pytest.approx(forward)
+    reverse = data["maxspeed_kmh"][directed(data, 2, 1)]
+    assert np.isnan(reverse) if backward is None else reverse == pytest.approx(backward)
+
+
+def test_reversed_oneway_takes_the_backward_limit(pbf, tmp_path):
+    nodes = {1: (0.01, 0), 2: (0.02, 0)}
+    tags = {
+        "highway": "road",
+        "oneway": "-1",
+        "maxspeed:forward": "50",
+        "maxspeed:backward": "30",
+    }
+    out = tmp_path / "roads"
+    preprocess(pbf(nodes, [(1, [1, 2], tags)]), out)
+    data = read_bbox(out, -180, -90, 180, 90)
+    assert (int(data["u"][0]), int(data["v"][0])) == (2, 1)
+    assert data["maxspeed_kmh"][0] == 30

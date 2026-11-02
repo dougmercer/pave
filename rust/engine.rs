@@ -1,5 +1,5 @@
 use crate::index::{DiskIndex, RefSorter, database, writer};
-use crate::storage::{Attributes, COLUMNS, Dictionaries, Spools};
+use crate::storage::{Attributes, COLUMNS, Dictionaries, STRING_SLOTS, Spools};
 use crate::tags::{self, HIGHWAYS, STRINGS, Tags};
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, SecondsFormat};
@@ -308,7 +308,7 @@ struct PreparedEdge {
 }
 
 struct PreparedWay {
-    strings: [Option<String>; 5],
+    strings: [Option<String>; STRINGS.len()],
     edges: Range<usize>,
 }
 
@@ -375,17 +375,26 @@ fn prepare_way(way: Way<'_>, nodes: &DiskIndex, out: &mut Prepared) -> Result<()
     attributes[..8].copy_from_slice(&way.id().to_le_bytes());
     attributes[8..16].copy_from_slice(&tags::width(&tags).to_le_bytes());
     attributes[16] = highway;
-    for (i, (name, kind)) in [
-        ("maxspeed", "speed"),
-        ("maxweight", "weight"),
-        ("maxheight", "length"),
-    ]
-    .iter()
-    .enumerate()
-    {
-        attributes[17 + i * 4..21 + i * 4]
+    for (offset, name, kind) in [
+        (21, "maxweight", "weight"),
+        (25, "maxheight", "length"),
+        (54, "maxwidth", "length"),
+        (58, "maxlength", "length"),
+    ] {
+        attributes[offset..offset + 4]
             .copy_from_slice(&tags::limit(tags::get(&tags, name), kind).to_le_bytes());
     }
+    let speed = |key| tags::limit(tags::get(&tags, key), "speed");
+    let directed_speed = |key| {
+        let value = speed(key);
+        if value.is_nan() {
+            speed("maxspeed")
+        } else {
+            value
+        }
+    };
+    let forward_speed = directed_speed("maxspeed:forward");
+    let backward_speed = directed_speed("maxspeed:backward");
     attributes[29] = tags::flags(&tags);
     let strings = STRINGS.map(|name| tags::get(&tags, name).map(str::to_owned));
     let direction = tags::direction(&tags);
@@ -417,6 +426,7 @@ fn prepare_way(way: Way<'_>, nodes: &DiskIndex, out: &mut Prepared) -> Result<()
         attributes[50..54].copy_from_slice(&(length_m(segment) as f32).to_le_bytes());
         if direction >= 0 {
             let (u, v) = (refs[start], refs[end]);
+            attributes[17..21].copy_from_slice(&forward_speed.to_le_bytes());
             out.edges.push(PreparedEdge {
                 u,
                 v,
@@ -428,6 +438,7 @@ fn prepare_way(way: Way<'_>, nodes: &DiskIndex, out: &mut Prepared) -> Result<()
         }
         if direction <= 0 {
             let (u, v) = (refs[end], refs[start]);
+            attributes[17..21].copy_from_slice(&backward_speed.to_le_bytes());
             out.edges.push(PreparedEdge {
                 u,
                 v,
@@ -491,14 +502,15 @@ pub fn run(config: Config) -> Result<String> {
         |_, block| prepare_block(block, &nodes),
         |prepared| {
             for way in &prepared.ways {
-                let mut codes = [0u8; 20];
+                let mut codes = [0; STRINGS.len()];
                 for (i, value) in way.strings.iter().enumerate() {
-                    let code = dictionaries.code(i, value.as_deref())?;
-                    codes[i * 4..i * 4 + 4].copy_from_slice(&code.to_le_bytes());
+                    codes[i] = dictionaries.code(i, value.as_deref())?;
                 }
                 for edge in &prepared.edges[way.edges.clone()] {
                     let mut attributes = edge.attributes;
-                    attributes[30..50].copy_from_slice(&codes);
+                    for (slot, code) in STRING_SLOTS.iter().zip(codes) {
+                        attributes[*slot..slot + 4].copy_from_slice(&code.to_le_bytes());
+                    }
                     let segment = &prepared.points[edge.points.clone()];
                     spools.append(
                         edge.u,
