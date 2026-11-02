@@ -4,14 +4,13 @@ use crate::tags::{self, HIGHWAYS, STRINGS, Tags, WAY_STRINGS};
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, SecondsFormat};
 use osmpbf::{BlobReader, BlobType, ByteOffset, Element, HeaderBlock, PrimitiveBlock, Way};
-use rayon::prelude::*;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::sync_channel;
+use std::sync::mpsc::{Receiver, sync_channel};
 use std::time::Instant;
 
 const UNSORTED_NODES: &str = "Nodes must have unique ascending IDs; use a sorted snapshot extract";
@@ -29,11 +28,11 @@ pub struct Config {
     pub spool_mb: usize,
     pub threads: usize,
     pub quiet: bool,
-    /// Polled between batches on the calling thread, so Ctrl-C is not deferred to the end.
+    /// Polled between blocks on the calling thread, so Ctrl-C is not deferred to the end.
     pub interrupted: Box<dyn Fn() -> Result<()> + Send + Sync>,
 }
 
-/// Run `work` on the decode pool in batches, feeding results to `consume` in source order.
+/// Run `work` on the decode pool, feeding results to `consume` in source order.
 /// Blocks are decoded, transformed and dropped by workers; the caller only does ordered I/O.
 fn pipeline<T: Send>(
     config: &Config,
@@ -42,37 +41,33 @@ fn pipeline<T: Send>(
     work: impl Fn(u64, PrimitiveBlock) -> Result<T> + Sync,
     mut consume: impl FnMut(T) -> Result<()>,
 ) -> Result<()> {
-    let (sender, receiver) = sync_channel::<Vec<T>>(2);
+    // One result slot per block in flight, so a slow block never idles the other workers.
+    let (sender, receiver) = sync_channel::<Receiver<Result<T>>>(config.threads * 2);
     let work = &work;
     std::thread::scope(|scope| {
         let producer = scope.spawn(move || -> Result<()> {
             let mut reader = BlobReader::seekable_from_path(&config.input)?;
-            for batch in offsets.chunks(config.threads * 2) {
-                let blobs = batch
-                    .iter()
-                    .map(|&offset| reader.blob_from_offset(ByteOffset(offset)))
-                    .collect::<osmpbf::Result<Vec<_>>>()?;
-                let results = pool.install(|| {
-                    blobs
-                        .par_iter()
-                        .map(|blob| {
-                            let offset = blob.offset().context("PBF reader has no byte offset")?.0;
-                            work(offset, blob.to_primitiveblock()?)
-                        })
-                        .collect::<Result<Vec<_>>>()
-                })?;
-                if sender.send(results).is_err() {
-                    break;
+            pool.in_place_scope(|tasks| {
+                for &offset in offsets {
+                    let blob = reader.blob_from_offset(ByteOffset(offset))?;
+                    let (result, slot) = sync_channel(1);
+                    if sender.send(slot).is_err() {
+                        break;
+                    }
+                    tasks.spawn(move |_| {
+                        let block = blob.to_primitiveblock().map_err(Into::into);
+                        let _ = result.send(block.and_then(|block| work(offset, block)));
+                    });
                 }
-            }
-            Ok(())
+                Ok(())
+            })
         });
         let consumed = (|| {
-            for batch in receiver {
+            for slot in receiver {
                 (config.interrupted)()?;
-                for item in batch {
-                    consume(item)?;
-                }
+                // A closed slot means its worker panicked, which joining the producer reports.
+                let Ok(item) = slot.recv() else { break };
+                consume(item?)?;
             }
             Ok(())
         })();
