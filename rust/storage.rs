@@ -181,6 +181,14 @@ pub struct TileRows {
 }
 
 impl TileRows {
+    pub fn with_capacity(edges: usize, vertices: usize) -> Self {
+        Self {
+            rows: Vec::with_capacity(edges * ROW_BYTES),
+            coords: Vec::with_capacity(vertices * 16),
+            runs: Vec::new(),
+        }
+    }
+
     /// Add an edge, after every earlier edge of its tile and before any of a later tile.
     #[allow(clippy::too_many_arguments)]
     pub fn push(
@@ -199,10 +207,13 @@ impl TileRows {
         row[16..VERTEX_COUNT].copy_from_slice(attributes);
         row[VERTEX_COUNT..].copy_from_slice(&(geometry.len() as i64).to_le_bytes());
         self.rows.extend_from_slice(&row);
-        for i in 0..geometry.len() {
+        let start = self.coords.len();
+        self.coords.resize(start + geometry.len() * 16, 0);
+        let slots = self.coords[start..].chunks_exact_mut(16);
+        for (i, slot) in slots.enumerate() {
             let point = geometry[if reverse { geometry.len() - i - 1 } else { i }];
-            self.coords.extend_from_slice(&point[0].to_le_bytes());
-            self.coords.extend_from_slice(&point[1].to_le_bytes());
+            slot[..8].copy_from_slice(&point[0].to_le_bytes());
+            slot[8..].copy_from_slice(&point[1].to_le_bytes());
         }
         if self.runs.last().is_none_or(|run| run.cell != cell) {
             self.runs.push(TileRun {

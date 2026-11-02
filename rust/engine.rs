@@ -404,7 +404,8 @@ impl Prepared {
         let edges = self.edges.iter().enumerate();
         let mut order: Vec<_> = edges.map(|(i, edge)| (grid.cell(first(edge)), i)).collect();
         order.sort_unstable();
-        let mut rows = TileRows::default();
+        let vertices = self.edges.iter().map(|edge| edge.points.len()).sum();
+        let mut rows = TileRows::with_capacity(self.edges.len(), vertices);
         for (cell, i) in order {
             let edge = &self.edges[i];
             let segment = &self.points[edge.points.clone()];

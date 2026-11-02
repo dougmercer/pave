@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 /// whole ID space, so leaves must be small for it to allocate little.
 const LEAF_BITS: u32 = 12;
 const LEAF_WORDS: usize = 1 << (LEAF_BITS - 6);
+/// Words a rank has to count at most, which keeps lookups in `used` short.
+const RANK_WORDS: usize = 8;
 /// Keeps the table of leaves small enough to allocate; OSM IDs reach about 2^34.
 const MAX_ID_SPAN: u64 = 1 << 40;
 
@@ -40,16 +42,6 @@ struct Leaf {
     junction: [AtomicU64; LEAF_WORDS],
 }
 
-impl Leaf {
-    /// Used nodes in the words before `word`.
-    fn used_before(&self, word: usize) -> u64 {
-        let words = self.used[..word].iter();
-        words
-            .map(|word| u64::from(word.load(Relaxed).count_ones()))
-            .sum()
-    }
-}
-
 impl Default for Leaf {
     fn default() -> Self {
         Self {
@@ -59,14 +51,29 @@ impl Default for Leaf {
     }
 }
 
+fn used_in(words: &[AtomicU64]) -> u16 {
+    words
+        .iter()
+        .map(|word| word.load(Relaxed).count_ones() as u16)
+        .sum()
+}
+
+/// Used nodes before a leaf, and within it before each `RANK_WORDS` of `used`. These sit
+/// beside the leaves because a leaf one byte larger takes a much larger allocation.
+#[derive(Clone, Copy)]
+struct LeafRank {
+    before: u64,
+    within: [u16; LEAF_WORDS / RANK_WORDS],
+}
+
 /// One bit per node ID for use by a drivable way and one for being a junction, so ways can
 /// mark nodes from any thread. A node's rank among the used IDs then locates its record.
 pub struct NodeIds {
     first: i64,
     span: u64,
     leaves: Vec<OnceLock<Box<Leaf>>>,
-    /// Used nodes before each leaf, filled in by `count`.
-    ranks: Vec<u64>,
+    /// One per leaf, filled in by `count`.
+    ranks: Vec<LeafRank>,
 }
 
 impl NodeIds {
@@ -109,12 +116,26 @@ impl NodeIds {
 
     /// Finish marking, returning how many nodes are used.
     pub fn count(&mut self, pool: &rayon::ThreadPool) -> usize {
-        let count =
-            |leaf: &OnceLock<Box<Leaf>>| leaf.get().map_or(0, |leaf| leaf.used_before(LEAF_WORDS));
+        let count = |leaf: &OnceLock<Box<Leaf>>| {
+            let mut rank = LeafRank {
+                before: 0,
+                within: [0; LEAF_WORDS / RANK_WORDS],
+            };
+            if let Some(leaf) = leaf.get() {
+                let mut total = 0;
+                let groups = rank.within.iter_mut().zip(leaf.used.chunks(RANK_WORDS));
+                for (within, words) in groups {
+                    *within = total;
+                    total += used_in(words);
+                }
+                rank.before = u64::from(total);
+            }
+            rank
+        };
         self.ranks = pool.install(|| self.leaves.par_iter().map(count).collect());
         let mut total = 0;
         for rank in &mut self.ranks {
-            total += std::mem::replace(rank, total);
+            total += std::mem::replace(&mut rank.before, total);
         }
         total as usize
     }
@@ -127,9 +148,11 @@ impl NodeIds {
         if used & bit == 0 {
             return None;
         }
-        let before = leaf.used_before(word) + u64::from((used & (bit - 1)).count_ones());
+        let (rank, group) = (&self.ranks[index], word / RANK_WORDS);
+        let within = rank.within[group] + used_in(&leaf.used[group * RANK_WORDS..word]);
+        let before = rank.before + u64::from(within) + u64::from((used & (bit - 1)).count_ones());
         let junction = leaf.junction[word].load(Relaxed) & bit != 0;
-        Some(((self.ranks[index] + before) as usize, junction))
+        Some((before as usize, junction))
     }
 }
 
