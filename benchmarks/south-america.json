@@ -1,5 +1,5 @@
 {
-  "recorded_at": "2026-11-02T18:30:38.095908+00:00",
+  "recorded_at": "2026-11-02T20:36:57.024665+00:00",
   "source_url": "https://download.geofabrik.de/south-america-261101.osm.pbf",
   "input_sha256": "8bb9be492fc0f0dd3b15cddcb1257ededb5655a566b9efbcbfc7548c87d90ffd",
   "input_bytes": 4155467745,
@@ -11,11 +11,79 @@
   "rustc": "rustc 1.93.0 (254b59607 2026-01-19) (Homebrew)",
   "build": "Maturin release, thin LTO, codegen-units=1",
   "method": "Fresh subprocess per run with default CLI settings, recorded per run; local temporary disk; OS file cache not flushed. Preprocessing time includes indexes, graph, columns and scratch cleanup; CLI wall also includes Python startup/imports. Downloads/builds excluded. Writes are flushed to the OS, not fsynced to physical media.",
-  "median_edges_per_second": 458457.6563127557,
-  "median_elapsed_seconds": 117.08988662494812,
-  "median_cli_edges_per_second": 457966.07452000043,
-  "peak_rss_bytes": 5293948928,
+  "median_edges_per_second": 1422565.3347977458,
+  "median_elapsed_seconds": 37.73517720901873,
+  "median_cli_edges_per_second": 1419549.9042231166,
+  "peak_rss_bytes": 5107318784,
   "runs": [
+    {
+      "buffers": {
+        "sort_runs": 23,
+        "spool_flushes": 835001
+      },
+      "drivable_ways": 12924877,
+      "edges": 53680755,
+      "implementation": "rust",
+      "settings": {
+        "sort_mb": 64,
+        "spool_mb": 64,
+        "threads": 8,
+        "tile_degrees": 0.1
+      },
+      "source": {
+        "file": "south-america-261101.osm.pbf",
+        "generator": "osmium/1.16.0",
+        "size_bytes": 4155467745,
+        "timestamp": "2026-11-01T21:21:36Z",
+        "timestamp_source": "pbf_header"
+      },
+      "stages": {
+        "columns_seconds": 6.601567917,
+        "edges_seconds": 14.457043,
+        "topology_seconds": 16.395576792
+      },
+      "tiles": 103167,
+      "vertices": 398566495,
+      "elapsed_seconds": 37.553717999951914,
+      "edges_per_second": 1429439.1569982162,
+      "peak_rss_bytes": 5048221696,
+      "cli_wall_seconds": 37.63215179101098,
+      "cli_edges_per_second": 1426459.8872292622
+    },
+    {
+      "buffers": {
+        "sort_runs": 23,
+        "spool_flushes": 834972
+      },
+      "drivable_ways": 12924877,
+      "edges": 53680755,
+      "implementation": "rust",
+      "settings": {
+        "sort_mb": 64,
+        "spool_mb": 64,
+        "threads": 8,
+        "tile_degrees": 0.1
+      },
+      "source": {
+        "file": "south-america-261101.osm.pbf",
+        "generator": "osmium/1.16.0",
+        "size_bytes": 4155467745,
+        "timestamp": "2026-11-01T21:21:36Z",
+        "timestamp_source": "pbf_header"
+      },
+      "stages": {
+        "columns_seconds": 6.579371833,
+        "edges_seconds": 14.808613875,
+        "topology_seconds": 16.774659
+      },
+      "tiles": 103167,
+      "vertices": 398566495,
+      "elapsed_seconds": 38.26176508294884,
+      "edges_per_second": 1402986.895236638,
+      "peak_rss_bytes": 5082234880,
+      "cli_wall_seconds": 38.342835041927174,
+      "cli_edges_per_second": 1400020.4977357856
+    },
     {
       "buffers": {
         "sort_runs": 23,
@@ -25,7 +93,6 @@
       "edges": 53680755,
       "implementation": "rust",
       "settings": {
-        "cache_mb": 32,
         "sort_mb": 64,
         "spool_mb": 64,
         "threads": 8,
@@ -39,87 +106,17 @@
         "timestamp_source": "pbf_header"
       },
       "stages": {
-        "columns_seconds": 72.27681725,
-        "edges_seconds": 26.288273792,
-        "topology_seconds": 21.571288458
+        "columns_seconds": 6.590984542,
+        "edges_seconds": 14.704624,
+        "topology_seconds": 16.340824417
       },
       "tiles": 103167,
       "vertices": 398566495,
-      "elapsed_seconds": 120.23570545809343,
-      "edges_per_second": 446462.6775838207,
-      "peak_rss_bytes": 5273157632,
-      "cli_wall_seconds": 120.32904537499417,
-      "cli_edges_per_second": 446116.35397512687
-    },
-    {
-      "buffers": {
-        "sort_runs": 23,
-        "spool_flushes": 835030
-      },
-      "drivable_ways": 12924877,
-      "edges": 53680755,
-      "implementation": "rust",
-      "settings": {
-        "cache_mb": 32,
-        "sort_mb": 64,
-        "spool_mb": 64,
-        "threads": 8,
-        "tile_degrees": 0.1
-      },
-      "source": {
-        "file": "south-america-261101.osm.pbf",
-        "generator": "osmium/1.16.0",
-        "size_bytes": 4155467745,
-        "timestamp": "2026-11-01T21:21:36Z",
-        "timestamp_source": "pbf_header"
-      },
-      "stages": {
-        "columns_seconds": 69.177218167,
-        "edges_seconds": 26.332037125,
-        "topology_seconds": 21.439761792
-      },
-      "tiles": 103167,
-      "vertices": 398566495,
-      "elapsed_seconds": 117.04880774999037,
-      "edges_per_second": 458618.5543611777,
-      "peak_rss_bytes": 5242421248,
-      "cli_wall_seconds": 117.1638174999971,
-      "cli_edges_per_second": 458168.36755085527
-    },
-    {
-      "buffers": {
-        "sort_runs": 23,
-        "spool_flushes": 835008
-      },
-      "drivable_ways": 12924877,
-      "edges": 53680755,
-      "implementation": "rust",
-      "settings": {
-        "cache_mb": 32,
-        "sort_mb": 64,
-        "spool_mb": 64,
-        "threads": 8,
-        "tile_degrees": 0.1
-      },
-      "source": {
-        "file": "south-america-261101.osm.pbf",
-        "generator": "osmium/1.16.0",
-        "size_bytes": 4155467745,
-        "timestamp": "2026-11-01T21:21:36Z",
-        "timestamp_source": "pbf_header"
-      },
-      "stages": {
-        "columns_seconds": 70.175356,
-        "edges_seconds": 25.176736042,
-        "topology_seconds": 21.649833625
-      },
-      "tiles": 103167,
-      "vertices": 398566495,
-      "elapsed_seconds": 117.08988662494812,
-      "edges_per_second": 458457.6563127557,
-      "peak_rss_bytes": 5293948928,
-      "cli_wall_seconds": 117.2155711670639,
-      "cli_edges_per_second": 457966.07452000043
+      "elapsed_seconds": 37.73517720901873,
+      "edges_per_second": 1422565.3347977458,
+      "peak_rss_bytes": 5107318784,
+      "cli_wall_seconds": 37.8153348750202,
+      "cli_edges_per_second": 1419549.9042231166
     }
   ]
 }
