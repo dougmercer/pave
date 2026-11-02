@@ -32,7 +32,7 @@ def main(argv=None) -> int:
             progress=None if args.quiet else lambda message: print(message, file=sys.stderr),
         )
     except (OSError, ValueError, RuntimeError) as error:
-        parser.exit(1, f"prep: {error}\n")
+        parser.exit(1, f"pave: {error}\n")
     print(json.dumps(report, indent=2))
     return 0
 

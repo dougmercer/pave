@@ -6,8 +6,8 @@ from pathlib import Path
 import numpy as np
 import osmium
 
-from osm_road_prep import iter_bbox_tiles, read_bbox
-from osm_road_prep.preprocess import preprocess
+from pave import iter_bbox_tiles, read_bbox
+from pave.preprocess import preprocess
 
 DRIVABLE = {
     "motorway",

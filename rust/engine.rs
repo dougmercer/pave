@@ -706,7 +706,7 @@ pub fn run(config: Config) -> Result<String> {
     columns.insert("vertices".into(), json!("<f8"));
     columns.insert("offsets".into(), json!("<i8"));
     let metadata = json!({
-        "format": "osm-road-prep", "version": 2, "crs": "EPSG:4326",
+        "format": "pave", "version": 2, "crs": "EPSG:4326",
         "coordinate_order": ["lon", "lat"], "source": source,
         "source_pbf_timestamp": source["timestamp"], "tile_degrees": config.degrees,
         "grid_origin": [-180, -90], "tile_assignment": "first_vertex",

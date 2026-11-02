@@ -31,7 +31,7 @@ def main():
                 [
                     sys.executable,
                     "-m",
-                    "osm_road_prep.cli",
+                    "pave.cli",
                     str(args.input.resolve()),
                     str(Path(temporary) / "roads"),
                     "--quiet",
@@ -66,7 +66,7 @@ def main():
         "processor": processor,
         "python": sys.version,
         "numpy": importlib.metadata.version("numpy"),
-        "package": importlib.metadata.version("osm-road-prep"),
+        "package": importlib.metadata.version("pave"),
         "rustc": subprocess.check_output(["rustc", "--version"], text=True).strip(),
         "build": "Maturin release, thin LTO, codegen-units=1",
         "method": "Fresh subprocess per run with default CLI settings, recorded per run; "

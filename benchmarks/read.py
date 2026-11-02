@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from osm_road_prep import read_bbox
+from pave import read_bbox
 
 QUERIES = {"point 200 m": 0.001, "city 5 km": 0.025, "region 25 km": 0.125, "metro 100 km": 0.5}
 ROUTING_COLUMNS = ("u", "v", "vertices", "width_m", "highway")

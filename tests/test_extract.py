@@ -11,9 +11,9 @@ import numpy as np
 import osmium
 import pytest
 
-from osm_road_prep import iter_bbox_tiles, read_bbox
-from osm_road_prep.preprocess import preprocess
-from osm_road_prep.schema import COLUMNS, HIGHWAYS
+from pave import iter_bbox_tiles, read_bbox
+from pave.preprocess import preprocess
+from pave.schema import COLUMNS, HIGHWAYS
 
 
 def edge_rows(columns, way_id):
@@ -378,7 +378,7 @@ def test_cli(pbf, tmp_path):
     command = [
         sys.executable,
         "-m",
-        "osm_road_prep.cli",
+        "pave.cli",
         str(path),
         str(tmp_path / "roads"),
         "--quiet",
@@ -502,7 +502,7 @@ def test_default_settings(pbf, tmp_path):
 
 def test_cli_uses_the_same_default_tile_size(pbf, tmp_path):
     path = pbf({1: (0, 0), 2: (0.1, 0.1)}, [(1, [1, 2], {"highway": "road"})])
-    command = [sys.executable, "-m", "osm_road_prep.cli", str(path), str(tmp_path / "roads")]
+    command = [sys.executable, "-m", "pave.cli", str(path), str(tmp_path / "roads")]
     run = subprocess.run([*command, "--quiet"], check=True, capture_output=True, text=True)
     assert json.loads(run.stdout)["settings"]["tile_degrees"] == 0.1
 
@@ -538,7 +538,7 @@ def test_cli_passes_buffer_settings(pbf, tmp_path):
     command = [
         sys.executable,
         "-m",
-        "osm_road_prep.cli",
+        "pave.cli",
         str(path),
         str(tmp_path / "roads"),
         "--quiet",

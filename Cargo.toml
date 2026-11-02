@@ -1,5 +1,5 @@
 [package]
-name = "osm-road-prep"
+name = "pave"
 version = "0.1.0"
 edition = "2024"
 description = "Disk-backed OSM PBF preprocessing into tiled directed road columns"

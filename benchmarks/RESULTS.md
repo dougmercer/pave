@@ -84,6 +84,6 @@ curl -L -o south-america.osm.pbf https://download.geofabrik.de/south-america-261
 uv run python benchmarks/run.py south-america.osm.pbf \
     --source-url https://download.geofabrik.de/south-america-261101.osm.pbf \
     --report benchmarks/result.json
-uv run prep south-america.osm.pbf south-america-roads/
+uv run pave south-america.osm.pbf south-america-roads/
 uv run python benchmarks/read.py south-america-roads/
 ```

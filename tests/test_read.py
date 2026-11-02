@@ -7,9 +7,9 @@ import sys
 import numpy as np
 import pytest
 
-from osm_road_prep import iter_bbox_tiles, read_bbox
-from osm_road_prep.preprocess import preprocess
-from osm_road_prep.schema import COLUMNS, STRINGS
+from pave import iter_bbox_tiles, read_bbox
+from pave.preprocess import preprocess
+from pave.schema import COLUMNS, STRINGS
 
 
 @pytest.fixture
@@ -180,7 +180,7 @@ def test_tile_offsets_start_at_zero_and_stay_read_only(scattered):
 def test_keeping_every_tile_needs_no_extra_file_descriptors(scattered):
     script = f"""
 import resource
-from osm_road_prep import iter_bbox_tiles
+from pave import iter_bbox_tiles
 resource.setrlimit(resource.RLIMIT_NOFILE, (64, resource.getrlimit(resource.RLIMIT_NOFILE)[1]))
 print(len(list(iter_bbox_tiles({str(scattered)!r}, -180, -90, 180, 90))))
 """

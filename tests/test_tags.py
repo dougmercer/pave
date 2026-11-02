@@ -2,7 +2,7 @@ import math
 
 import pytest
 
-from osm_road_prep.tags import direction, flags, scalar, width_m
+from pave.tags import direction, flags, scalar, width_m
 
 
 @pytest.mark.parametrize(

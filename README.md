@@ -1,4 +1,4 @@
-# osm-road-prep
+# pave
 
 A Maturin/PyO3 package that converts an OpenStreetMap `.osm.pbf` snapshot into a
 tiled directed road graph. **The entire preprocessing hot path runs in Rust**:
@@ -14,12 +14,12 @@ data.
 
 ```sh
 uv sync
-uv run prep input.osm.pbf outdir/
+uv run pave input.osm.pbf outdir/
 ```
 
 The default build profile is **release**, including when `uv sync` builds the
 editable Maturin package. Alternatively, `pip install .` builds the package and
-installs the `prep` command. After editing Rust code, rebuild with:
+installs the `pave` command. After editing Rust code, rebuild with:
 
 ```sh
 uv run maturin develop --release
@@ -28,7 +28,7 @@ uv run maturin develop --release
 Options:
 
 ```sh
-prep input.osm.pbf outdir/ --tile-degrees 0.1 --workdir /fast-disk/scratch \
+pave input.osm.pbf outdir/ --tile-degrees 0.1 --workdir /fast-disk/scratch \
     --threads 8 --spool-mb 64
 ```
 
@@ -53,7 +53,7 @@ within its destination filesystem.
 ## Read
 
 ```python
-from osm_road_prep import read_bbox
+from pave import read_bbox
 
 roads = read_bbox("outdir", west=6.0, south=49.5, east=6.3, north=49.8)
 i = 0
