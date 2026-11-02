@@ -276,13 +276,12 @@ impl Spools {
     }
 
     /// Read chunks concurrently, because a chunk evicted from the page cache costs a disk read.
-    fn read_chunks<'c>(
+    fn read_chunks(
         log: &File,
-        chunks: impl Iterator<Item = &'c Chunk>,
+        chunks: &[&Chunk],
         buffer: &mut Vec<u8>,
         pool: &rayon::ThreadPool,
     ) -> Result<()> {
-        let chunks: Vec<_> = chunks.collect();
         buffer.resize(chunks.iter().map(|chunk| chunk.size()).sum(), 0);
         let mut unread = buffer.as_mut_slice();
         let mut reads = Vec::with_capacity(chunks.len());
@@ -324,6 +323,7 @@ impl Spools {
         let log = File::open(&self.log_path)?;
         let mut buffer = Vec::new();
         let (mut edge_start, mut vertex_start) = (0, 0);
+        let mut position = 0i64;
         let mut count = 0u64;
         let mut keys: Vec<_> = self.tiles.keys().copied().collect();
         keys.sort_unstable();
@@ -345,31 +345,36 @@ impl Spools {
                 .max(1);
             let (batch, rest) = remaining.split_at(batch);
             remaining = rest;
-            let chunks = batch.iter().flat_map(|key| &self.tiles[key].chunks);
-            Self::read_chunks(&log, chunks, &mut buffer, pool)?;
-            let mut unread = buffer.as_slice();
+            let chunks: Vec<_> = batch
+                .iter()
+                .flat_map(|key| &self.tiles[key].chunks)
+                .collect();
+            Self::read_chunks(&log, &chunks, &mut buffer, pool)?;
+            position = Self::write_columns(
+                &buffer,
+                &chunks,
+                &mut columns,
+                &mut offsets,
+                &mut vertices,
+                position,
+                pool,
+            )?;
             for key in batch {
                 let tile = self.tiles.get_mut(key).unwrap();
                 tile.meta.edge_start = edge_start;
                 tile.meta.vertex_start = vertex_start;
                 edge_start += tile.meta.edges;
                 vertex_start += tile.meta.vertices;
-                let tile = &self.tiles[key];
-                unread = Self::finish_tile(
-                    unread,
-                    &tile.chunks,
-                    &mut columns,
-                    &mut offsets,
-                    &mut vertices,
-                    tile.meta.vertex_start as i64,
-                    tile.meta.vertices,
-                )?;
                 if count > 0 {
                     manifest.write_all(b",\n")?;
                 }
                 serde_json::to_writer(&mut manifest, &tile.meta)?;
                 count += 1;
             }
+            ensure!(
+                position == vertex_start as i64,
+                "Vertex spool count mismatch"
+            );
         }
         for column in &mut columns {
             column.flush()?;
@@ -382,35 +387,54 @@ impl Spools {
         Ok(count)
     }
 
-    /// Append one tile from `spool` to the shared columns, returning the bytes after it;
-    /// offsets stay global across tiles.
-    #[allow(clippy::too_many_arguments)]
-    fn finish_tile<'s>(
-        mut spool: &'s [u8],
-        chunks: &[Chunk],
+    /// Append spooled chunks to the shared columns, returning the next vertex position.
+    /// Every file has its own writer, so they fill at once; offsets stay global across tiles.
+    fn write_columns(
+        spool: &[u8],
+        chunks: &[&Chunk],
         columns: &mut [BufWriter<File>],
         offsets: &mut BufWriter<File>,
         vertices: &mut BufWriter<File>,
         mut position: i64,
-        tile_vertices: u64,
-    ) -> Result<&'s [u8]> {
-        let stop = position + tile_vertices as i64;
-        for chunk in chunks {
-            let (rows, rest) = spool.split_at(chunk.rows);
-            let (coords, rest) = rest.split_at(chunk.coords);
-            spool = rest;
-            for (column, (_, _, start, width)) in columns.iter_mut().zip(COLUMNS) {
-                for row in rows.chunks_exact(ROW_BYTES) {
-                    column.write_all(&row[start..start + width])?;
-                }
-            }
-            for row in rows.chunks_exact(ROW_BYTES) {
-                position += i64::from_le_bytes(row[VERTEX_COUNT..].try_into().unwrap());
-                offsets.write_all(&position.to_le_bytes())?;
-            }
-            vertices.write_all(coords)?;
-        }
-        ensure!(position == stop, "Vertex spool count mismatch");
-        Ok(spool)
+        pool: &rayon::ThreadPool,
+    ) -> Result<i64> {
+        let mut unread = spool;
+        let parts: Vec<_> = chunks
+            .iter()
+            .map(|chunk| {
+                let (rows, rest) = unread.split_at(chunk.rows);
+                let (coords, rest) = rest.split_at(chunk.coords);
+                unread = rest;
+                (rows, coords)
+            })
+            .collect();
+        let rows = || {
+            parts
+                .iter()
+                .flat_map(|(rows, _)| rows.chunks_exact(ROW_BYTES))
+        };
+        let (filled, appended) = pool.install(|| {
+            rayon::join(
+                || {
+                    columns.par_iter_mut().zip(&COLUMNS).try_for_each(
+                        |(column, (_, _, start, width))| {
+                            rows().try_for_each(|row| column.write_all(&row[*start..start + width]))
+                        },
+                    )
+                },
+                || -> std::io::Result<i64> {
+                    for row in rows() {
+                        position += i64::from_le_bytes(row[VERTEX_COUNT..].try_into().unwrap());
+                        offsets.write_all(&position.to_le_bytes())?;
+                    }
+                    for (_, coords) in &parts {
+                        vertices.write_all(coords)?;
+                    }
+                    Ok(position)
+                },
+            )
+        });
+        filled?;
+        Ok(appended?)
     }
 }
