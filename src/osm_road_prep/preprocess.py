@@ -33,7 +33,7 @@ def preprocess(
 
     Input must be a PBF snapshot with unique ascending node and way IDs and
     complete node references for drivable ways. The native call releases the GIL.
-    `workdir` may put scratch indexes/spools on a separate disk. `cache_mb`,
+    Scratch indexes/spools go beside `outdir` unless `workdir` names another disk. `cache_mb`,
     `sort_mb`, and `spool_mb` bound the SQLite dictionary cache, the sort run size,
     and buffered tile output; the report's `buffers` shows how often the latter two
     spilled. `threads` sets the decode workers. Output must be absent or empty.
@@ -59,7 +59,9 @@ def preprocess(
     with tempfile.TemporaryDirectory(prefix=".osm-road-output-", dir=outdir.parent) as staging:
         output = Path(staging) / "dataset"
         output.mkdir()
-        with tempfile.TemporaryDirectory(prefix="osm-road-scratch-", dir=workdir) as temporary:
+        # The system temp directory may be RAM-backed, so stay on the output's disk by default.
+        scratch = outdir.parent if workdir is None else workdir
+        with tempfile.TemporaryDirectory(prefix="osm-road-scratch-", dir=scratch) as temporary:
             report = json.loads(
                 _native.build(
                     input_path,

@@ -2,6 +2,7 @@ import json
 import random
 import subprocess
 import sys
+import tempfile
 
 import numpy as np
 import osmium
@@ -398,3 +399,10 @@ def test_cli_passes_buffer_settings(pbf, tmp_path):
     run = subprocess.run(command, check=True, capture_output=True, text=True)
     settings = json.loads(run.stdout)["settings"]
     assert (settings["sort_mb"], settings["spool_mb"]) == (3, 5)
+
+
+def test_scratch_defaults_beside_the_output(pbf, tmp_path, monkeypatch):
+    # The system temp directory can be RAM-backed, so it must not be used implicitly.
+    path = pbf({1: (0, 0), 2: (0.1, 0.1)}, [(1, [1, 2], {"highway": "road"})])
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "no-such-directory"))
+    assert preprocess(path, tmp_path / "roads")["edges"] == 2

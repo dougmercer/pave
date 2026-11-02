@@ -12,7 +12,9 @@ def main(argv=None) -> int:
     parser.add_argument("input", help="Input .osm.pbf snapshot")
     parser.add_argument("outdir", help="New or empty output directory")
     parser.add_argument("--tile-degrees", type=float, default=0.25)
-    parser.add_argument("--workdir", help="Directory for disk-backed scratch indexes and spools")
+    parser.add_argument(
+        "--workdir", help="Scratch directory for indexes and spools (default: beside outdir)"
+    )
     parser.add_argument(
         "--cache-mb", type=int, default=32, help="SQLite dictionary cache (default: 32 MiB)"
     )

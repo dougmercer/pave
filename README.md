@@ -32,6 +32,7 @@ prep input.osm.pbf outdir/ --tile-degrees 0.25 --workdir /fast-disk/scratch \
     --threads 8 --cache-mb 32 --sort-mb 64 --spool-mb 64
 ```
 
+Scratch files go beside the output unless `--workdir` names another disk.
 `--threads` sets the workers that decode and transform PBF blocks, and bounds the
 blocks in flight; one more thread reads the file and the calling thread writes
 output. `--cache-mb` sizes the SQLite cache for string dictionaries. `--sort-mb`
