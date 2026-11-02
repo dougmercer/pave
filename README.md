@@ -233,8 +233,8 @@ with a barrier or limit), dictionary database, spool log, and output. The spool 
 uses 16 bytes per directed vertex and 98 bytes per edge. Final edge columns use 98
 bytes per edge plus 16 bytes per directed vertex, dictionaries, and small `.npy`
 headers. Runs, the used-node list, and the location indexes are deleted as soon as
-each pass finishes; the spool log lasts until the columns are written, so peak
-scratch is about the size of the output plus the output itself.
+each pass finishes. The spool log lasts until the columns are written, so peak disk
+use is about twice the size of the output.
 
 ## Tests and benchmarks
 

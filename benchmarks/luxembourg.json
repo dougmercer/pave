@@ -1,5 +1,5 @@
 {
-  "recorded_at": "2026-11-02T17:19:26.233144+00:00",
+  "recorded_at": "2026-11-02T18:24:40.950625+00:00",
   "source_url": "https://download.geofabrik.de/europe/luxembourg-latest.osm.pbf",
   "input_sha256": "5fc9e68a664f359268f5f3a2bed33c09b24361150fed0860e150ba30e3e8e3b6",
   "input_bytes": 47857936,
@@ -11,25 +11,25 @@
   "rustc": "rustc 1.93.0 (254b59607 2026-01-19) (Homebrew)",
   "build": "Maturin release, thin LTO, codegen-units=1",
   "method": "Fresh subprocess per run with default CLI settings, recorded per run; local temporary disk; OS file cache not flushed. Preprocessing time includes indexes, graph, columns and scratch cleanup; CLI wall also includes Python startup/imports. Downloads/builds excluded. Writes are flushed to the OS, not fsynced to physical media.",
-  "median_edges_per_second": 588522.17631906,
-  "median_elapsed_seconds": 0.45335250010248274,
-  "median_cli_edges_per_second": 508540.78652701253,
-  "peak_rss_bytes": 240353280,
+  "median_edges_per_second": 651718.8597108551,
+  "median_elapsed_seconds": 0.41398679197300225,
+  "median_cli_edges_per_second": 554871.6761605452,
+  "peak_rss_bytes": 243941376,
   "runs": [
     {
       "buffers": {
         "sort_runs": 1,
-        "spool_flushes": 14
+        "spool_flushes": 52
       },
-      "drivable_ways": 92711,
-      "edges": 266808,
+      "drivable_ways": 93624,
+      "edges": 269803,
       "implementation": "rust",
       "settings": {
         "cache_mb": 32,
         "sort_mb": 64,
         "spool_mb": 64,
         "threads": 8,
-        "tile_degrees": 0.25
+        "tile_degrees": 0.1
       },
       "source": {
         "file": "osm-road-prep-luxembourg.osm.pbf",
@@ -39,32 +39,32 @@
         "timestamp_source": "pbf_header"
       },
       "stages": {
-        "columns_seconds": 0.030094375,
-        "edges_seconds": 0.148505208,
-        "topology_seconds": 0.31016125
+        "columns_seconds": 0.036521709,
+        "edges_seconds": 0.169016917,
+        "topology_seconds": 0.300406625
       },
-      "tiles": 14,
-      "vertices": 1625556,
-      "elapsed_seconds": 0.49108791700564325,
-      "edges_per_second": 543299.8670112545,
-      "peak_rss_bytes": 240353280,
-      "cli_wall_seconds": 0.5618054589722306,
-      "cli_edges_per_second": 474911.7256498357
+      "tiles": 52,
+      "vertices": 1635960,
+      "elapsed_seconds": 0.5090378330787644,
+      "edges_per_second": 530025.4371432012,
+      "peak_rss_bytes": 240123904,
+      "cli_wall_seconds": 0.5824115000432357,
+      "cli_edges_per_second": 463251.4982619179
     },
     {
       "buffers": {
         "sort_runs": 1,
-        "spool_flushes": 14
+        "spool_flushes": 52
       },
-      "drivable_ways": 92711,
-      "edges": 266808,
+      "drivable_ways": 93624,
+      "edges": 269803,
       "implementation": "rust",
       "settings": {
         "cache_mb": 32,
         "sort_mb": 64,
         "spool_mb": 64,
         "threads": 8,
-        "tile_degrees": 0.25
+        "tile_degrees": 0.1
       },
       "source": {
         "file": "osm-road-prep-luxembourg.osm.pbf",
@@ -74,32 +74,32 @@
         "timestamp_source": "pbf_header"
       },
       "stages": {
-        "columns_seconds": 0.030430417,
-        "edges_seconds": 0.153685375,
-        "topology_seconds": 0.266699709
+        "columns_seconds": 0.036827167,
+        "edges_seconds": 0.15090875,
+        "topology_seconds": 0.223324917
       },
-      "tiles": 14,
-      "vertices": 1625556,
-      "elapsed_seconds": 0.45335250010248274,
-      "edges_per_second": 588522.17631906,
-      "peak_rss_bytes": 238108672,
-      "cli_wall_seconds": 0.5246540829539299,
-      "cli_edges_per_second": 508540.78652701253
+      "tiles": 52,
+      "vertices": 1635960,
+      "elapsed_seconds": 0.41398679197300225,
+      "edges_per_second": 651718.8597108551,
+      "peak_rss_bytes": 243154944,
+      "cli_wall_seconds": 0.48624395800288767,
+      "cli_edges_per_second": 554871.6761605452
     },
     {
       "buffers": {
         "sort_runs": 1,
-        "spool_flushes": 14
+        "spool_flushes": 52
       },
-      "drivable_ways": 92711,
-      "edges": 266808,
+      "drivable_ways": 93624,
+      "edges": 269803,
       "implementation": "rust",
       "settings": {
         "cache_mb": 32,
         "sort_mb": 64,
         "spool_mb": 64,
         "threads": 8,
-        "tile_degrees": 0.25
+        "tile_degrees": 0.1
       },
       "source": {
         "file": "osm-road-prep-luxembourg.osm.pbf",
@@ -109,17 +109,17 @@
         "timestamp_source": "pbf_header"
       },
       "stages": {
-        "columns_seconds": 0.0299335,
-        "edges_seconds": 0.162011875,
-        "topology_seconds": 0.226821083
+        "columns_seconds": 0.036668458,
+        "edges_seconds": 0.155449292,
+        "topology_seconds": 0.211601667
       },
-      "tiles": 14,
-      "vertices": 1625556,
-      "elapsed_seconds": 0.42122300004120916,
-      "edges_per_second": 633412.7053221158,
-      "peak_rss_bytes": 232620032,
-      "cli_wall_seconds": 0.4922012500464916,
-      "cli_edges_per_second": 542070.9516174496
+      "tiles": 52,
+      "vertices": 1635960,
+      "elapsed_seconds": 0.407753917039372,
+      "edges_per_second": 661680.9519795447,
+      "peak_rss_bytes": 243941376,
+      "cli_wall_seconds": 0.47973783395718783,
+      "cli_edges_per_second": 562396.7527732603
     }
   ]
 }
